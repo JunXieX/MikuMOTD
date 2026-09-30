@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 三场景 MOTD 性能对比：裸代理 / 事件模式兜底 / 字节级快速路径。
+# MOTD 插件性能对比：裸代理 / MiniMOTD / FastMOTD / MikuMOTD 事件模式 / MikuMOTD 快速路径。
 # 场景交替轮测以抵消共享 runner 的负载漂移，结果以中位数写入 job summary。
+# 第三方插件在现场从源码构建，构建失败的场景自动跳过，不影响其余场景。
 set -euo pipefail
 
 DIR=bench-run
@@ -25,18 +26,71 @@ if [ ! -x "$JCMD" ]; then
   echo "JAVA_HOME 未指向可用的 JDK: $JAVA_HOME" >&2
   exit 1
 fi
-
+mkdir -p "$WORK"
 "${JAVA_HOME}/bin/javac" -d "$WORK" bench/MotdBench.java
 
-# 场景目录：bare=无插件；compat=事件模式；fast=快速路径。
-# compat/fast 使用同一份精简配置（无图标、短描述），排除载荷大小差异。
+declare -A SKIPPED
+
+# ---------------------------------------------------------------------------
+# 第三方插件构建（构建失败仅跳过对应场景）
+# ---------------------------------------------------------------------------
+
+build_fastmotd() {
+  local src=$WORK/src-FastMOTD
+  git clone --depth 1 https://github.com/Elytrium/FastMOTD "$src" >/dev/null 2>&1
+  (cd "$src" && ./gradlew build -x test --no-daemon -q) >&2
+  local jar
+  jar=$(find "$src/build/libs" -name "*.jar" ! -name "*-sources.jar" | head -1)
+  [ -n "$jar" ]
+  echo "$jar"
+}
+
+build_minimotd() {
+  local src=$WORK/src-MiniMOTD
+  git clone --depth 1 https://github.com/jpenilla/MiniMOTD "$src" >/dev/null 2>&1
+  (cd "$src" && ./gradlew build -x test --no-daemon -q) >&2
+  local jar
+  jar=$(find "$src" -path "*/build/libs/*" -name "*.jar" ! -name "*-sources.jar" | grep -i velocity | head -1)
+  [ -n "$jar" ]
+  echo "$jar"
+}
+
+echo "== 构建第三方插件 =="
+FASTMOTD_JAR=""
+if build_fastmotd > "$WORK/fastmotd-jar.txt"; then
+  FASTMOTD_JAR=$(cat "$WORK/fastmotd-jar.txt")
+  echo "FastMOTD 构建成功：$FASTMOTD_JAR"
+else
+  SKIPPED[fastmotd]="源码构建失败"
+  echo "FastMOTD 构建失败，将跳过该场景"
+fi
+
+MINIMOTD_JAR=""
+if build_minimotd > "$WORK/minimotd-jar.txt"; then
+  MINIMOTD_JAR=$(cat "$WORK/minimotd-jar.txt")
+  echo "MiniMOTD 构建成功：$MINIMOTD_JAR"
+else
+  SKIPPED[minimotd]="源码构建失败"
+  echo "MiniMOTD 构建失败，将跳过该场景"
+fi
+
+# ---------------------------------------------------------------------------
+# 场景准备
+# ---------------------------------------------------------------------------
+
+# 场景目录：bare=无插件；minimotd/fastmotd=第三方；compat=事件模式；fast=快速路径。
+# 所有带插件场景使用对齐的精简 MOTD（单行描述、无图标、无玩家列表、固定 1000 上限），
+# 排除载荷与功能差异，只对比处理路径开销。
 make_plugins() {
   local target=$1 mode=$2
   rm -rf "$target"
   mkdir -p "$target/mikumotd"
-  if [ "$mode" != "bare" ]; then
-    cp "$PLUGIN_JAR" "$target/"
-    cat > "$target/mikumotd/config.conf" <<CONF
+  case $mode in
+    bare)
+      ;;
+    compat | fast)
+      cp "$PLUGIN_JAR" "$target/"
+      cat > "$target/mikumotd/config.conf" <<CONF
 general {
     update-interval-ms=3000
     direct-write=true
@@ -51,13 +105,58 @@ players {
     fake-online-percent=0
 }
 motd {
-    version-name="MikuMOTD"
+    version-name="Benchmark"
     descriptions=["&aBenchmark MOTD line one"]
     favicons=[]
     player-list=[]
 }
 CONF
-  fi
+      ;;
+    fastmotd)
+      cp "$FASTMOTD_JAR" "$target/"
+      cat > "$target/fastmotd/config.yml" <<'YAML'
+SERIALIZER: LEGACY_AMPERSAND
+MAIN:
+  ENABLE_UPDATES: false
+  VERSION_NAME: "Benchmark"
+  DESCRIPTIONS: ["&aBenchmark MOTD line one"]
+  FAVICONS: []
+  INFORMATION: []
+  UPDATE_RATE: 3000
+  MAX_COUNT_TYPE: VARIABLE
+  MAX_COUNT: 1000
+  FAKE_ONLINE_ADD_SINGLE: 0
+  FAKE_ONLINE_ADD_PERCENT: 0
+  PNG_QUALITY: -1
+  DIRECT_WRITE: false
+  LOG_PINGS: false
+  LOG_IMPROPER_PINGS: false
+  ALLOW_IMPROPER_PINGS: false
+  VERSIONS:
+    DESCRIPTIONS: {}
+    FAVICONS: {}
+    INFORMATION: {}
+  DOMAINS: {}
+MAINTENANCE:
+  MAINTENANCE_ENABLED: false
+SHUTDOWN_SCHEDULER:
+  SHUTDOWN_SCHEDULER_ENABLED: false
+YAML
+      ;;
+    minimotd)
+      cp "$MINIMOTD_JAR" "$target/"
+      ;;
+  esac
+}
+
+# 各插件在服务器日志中的加载成功标志
+loaded_marker() {
+  case $1 in
+    fastmotd) echo "fastmotd" ;;
+    minimotd) echo "minimotd" ;;
+    compat | fast) echo "mikumotd" ;;
+    bare) echo "Done" ;;
+  esac
 }
 
 start_proxy() {
@@ -65,7 +164,9 @@ start_proxy() {
   local run_dir=$WORK/run-$name
   make_plugins "$WORK/plugins-$name" "$mode"
   mkdir -p "$run_dir/plugins"
-  cp -r "$WORK/plugins-$name/." "$run_dir/plugins/"
+  if [ "$mode" != "bare" ]; then
+    cp -r "$WORK/plugins-$name/." "$run_dir/plugins/"
+  fi
 
   local log=$WORK/$name-server.log
   : > "$log"
@@ -73,6 +174,14 @@ start_proxy() {
 
   for _ in $(seq 1 90); do
     if grep -q "Done" "$log" 2>/dev/null; then
+      # 带插件场景再确认目标插件确实加载（而非因不兼容被跳过）
+      if [ "$mode" != "bare" ]; then
+        if ! grep -qi "Loaded plugin $(loaded_marker "$mode")" "$log"; then
+          echo "插件未加载成功: $mode" >&2
+          grep -iE "plugin|error" "$log" | tail -10 >&2 || true
+          return 1
+        fi
+      fi
       return 0
     fi
     if ! kill -0 "$(cat "$WORK/$name.pid")" 2>/dev/null; then
@@ -94,12 +203,10 @@ stop_proxy() {
     pid=$(cat "$WORK/$name.pid")
     kill "$pid" 2>/dev/null || true
     sleep 2
-    # Velocity 的优雅关闭可能等待内部任务超过可接受时长，基准切换场景直接强杀
     kill -9 "$pid" 2>/dev/null || true
     rm -f "$WORK/$name.pid"
   fi
   pkill -9 -f "velocity.jar" 2>/dev/null || true
-  # 等端口释放，避免影响下一场景
   for _ in $(seq 1 30); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
       exec 3>&- 3<&- || true
@@ -120,10 +227,32 @@ measure() {
   echo "  第 $round 轮：延迟 ${lat}µs，QPS $qps（失败 $fail）"
 }
 
+scenario_label() {
+  case $1 in
+    bare) echo "裸代理（无插件）" ;;
+    minimotd) echo "MiniMOTD" ;;
+    fastmotd) echo "FastMOTD" ;;
+    compat) echo "MikuMOTD 事件模式" ;;
+    fast) echo "MikuMOTD 快速路径" ;;
+  esac
+}
+
+SCENARIOS=(bare)
+[ -z "${SKIPPED[minimotd]:-}" ] && SCENARIOS+=(minimotd)
+[ -z "${SKIPPED[fastmotd]:-}" ] && SCENARIOS+=(fastmotd)
+SCENARIOS+=(compat fast)
+
 echo "== 场景交替测量（共 $ROUNDS 轮）=="
+declare -A SCENARIO_FAILED
 for round in $(seq 1 "$ROUNDS"); do
-  for scenario in bare compat fast; do
-    start_proxy "$scenario" "$scenario"
+  for scenario in "${SCENARIOS[@]}"; do
+    if [ -n "${SCENARIO_FAILED[$scenario]:-}" ]; then
+      continue
+    fi
+    if ! start_proxy "$scenario" "$scenario"; then
+      SCENARIO_FAILED[$scenario]="运行失败"
+      continue
+    fi
     echo "[$scenario 第 $round 轮]"
     measure "$scenario" "$round"
     stop_proxy "$scenario"
@@ -136,23 +265,27 @@ median() {
 }
 
 {
-  echo "## MOTD 性能对比（runner 内自连，$ROUNDS 轮中位数）"
+  echo "## MOTD 插件性能对比（Velocity 4.2.0，runner 内自连，$ROUNDS 轮中位数）"
   echo
   echo "| 场景 | 平均延迟（µs/完整 ping） | QPS（${BENCH_THREADS} 线程 × ${BENCH_SECONDS}s） | 最大失败数 |"
   echo "|---|---|---|---|"
-  for scenario in bare compat fast; do
-    case $scenario in
-      bare)  label="裸代理（无插件）" ;;
-      compat) label="MikuMOTD 事件模式" ;;
-      fast)  label="MikuMOTD 快速路径" ;;
-    esac
+  for scenario in bare minimotd fastmotd compat fast; do
+    if [ -n "${SKIPPED[$scenario]:-}" ]; then
+      printf '| %s | 构建失败，跳过 | - | - |\n' "$(scenario_label "$scenario")"
+      continue
+    fi
+    if [ -n "${SCENARIO_FAILED[$scenario]:-}" ]; then
+      printf '| %s | 运行失败，跳过 | - | - |\n' "$(scenario_label "$scenario")"
+      continue
+    fi
     lats=$(awk -v s="$scenario" '$1==s {print $3}' "$RESULTS")
     qpss=$(awk -v s="$scenario" '$1==s {print $4}' "$RESULTS")
     fails=$(awk -v s="$scenario" '$1==s {print $5}' "$RESULTS" | sort -g | tail -1)
-    printf '| %s | %s | %s | %s |\n' "$label" "$(median $lats)" "$(median $qpss)" "${fails:-0}"
+    printf '| %s | %s | %s | %s |\n' "$(scenario_label "$scenario")" "$(median $lats)" "$(median $qpss)" "${fails:-0}"
   done
   echo
   echo "> 共享 runner 上负载有漂移，本表仅供同批次内横向对比，绝对数值不代表生产环境。"
+  echo "> MiniMOTD 与 FastMOTD 为现场源码构建，MOTD 内容已对齐为单行描述（FastMOTD 若加载失败见日志）。"
 } > "$SUMMARY"
 
 cat "$SUMMARY"
