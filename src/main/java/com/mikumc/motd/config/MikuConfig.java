@@ -296,8 +296,9 @@ public final class MikuConfig {
         general.node("update-interval-ms").set(this.updateIntervalMs).comment(
                 "在线人数刷新间隔（毫秒）");
         general.node("direct-write").set(this.directWrite).comment(
-                "true 时直接写入连接出站缓冲，完全绕过 Netty 出站管线（最快）；\n"
-                + "false 时走标准管线写出，兼容在出站方向拦截数据包的其他插件");
+                "true 时直接写入连接出站缓冲（最快）；\n"
+                + "false 时走 Netty 标准 write 路径，出站方向的其他处理器仍会看到响应帧。\n"
+                + "两种模式的响应帧均自带长度前缀，仅传播路径不同");
         general.node("compat-mode").set(this.compatMode).comment(
                 "强制使用事件模式（禁用快速路径注入）；\n"
                 + "注入不可用时插件也会自动回退到事件模式，仅性能不同");

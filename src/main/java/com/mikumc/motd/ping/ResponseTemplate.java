@@ -43,9 +43,7 @@ public final class ResponseTemplate {
     ) {
     }
 
-    // 动态模板整体重建时会随新帧更新（帧长度跨 VarInt 边界时前缀长度会变化）；
-    // 静态模板构造后不变
-    private int prefixLength;
+    // 动态模板整体重建时会随新帧更新；静态模板构造后不变
     private int protocolOffset;
     private int onlineOffset;
     private int maxOffset;
@@ -54,15 +52,11 @@ public final class ResponseTemplate {
     private final DynamicSource dynamicSource;
 
     private volatile ByteBuf fullFrame;
-    /** fullFrame 的体视图（跳过长度前缀），供走 Netty 出站管线时使用（由帧编码器补前缀）。 */
-    private volatile ByteBuf bodyView;
     private final Map<Integer, ByteBuf> protocolViews = new ConcurrentHashMap<>();
     private volatile ServerPing compatPing;
 
     private ResponseTemplate(ByteBuf frame, Offsets offsets, boolean fixedProtocol, DynamicSource source) {
         this.fullFrame = frame;
-        this.bodyView = frame.retainedSlice(offsets.prefixLength, frame.readableBytes() - offsets.prefixLength);
-        this.prefixLength = offsets.prefixLength;
         // 渲染期偏移相对 JSON 起点，帧内绝对偏移需加上帧前缀、包号与 JSON 长度前缀
         this.protocolOffset = offsets.protocol + offsets.jsonOffset;
         this.onlineOffset = offsets.online + offsets.jsonOffset;
@@ -84,13 +78,15 @@ public final class ResponseTemplate {
     }
 
     /**
-     * 取一条可直接写出的响应帧。调用方写出后必须释放（引用计数已加一）。
-     * 模板已销毁时返回 null。
+     * 取一条可直接写出的完整响应帧（自带 VarInt 长度前缀）。
+     * 调用方写出后必须释放（引用计数已加一）。模板已销毁时返回 null。
+     *
+     * <p>出站管线不会经过帧编码器（处理器挂在 pipeline 前段，outbound 向 head 传播），
+     * 因此无论直写还是走 writeAndFlush，都必须使用完整帧。</p>
      *
      * @param protocol 客户端协议号
-     * @param direct   true 返回含长度前缀的全帧（直写出站缓冲用），false 返回体视图（走管线时帧编码器补前缀）
      */
-    public ByteBuf acquire(int protocol, boolean direct) {
+    public ByteBuf acquire(int protocol) {
         ByteBuf frame = this.fullFrame;
         if (frame == null) {
             return null;
@@ -112,10 +108,7 @@ public final class ResponseTemplate {
                 source = view;
             }
         }
-
-        return direct
-                ? source.retainedDuplicate()
-                : source.retainedSlice(this.prefixLength, source.readableBytes() - this.prefixLength);
+        return source.retainedDuplicate();
     }
 
     /** 事件模式兜底用的 ServerPing（协议号仍需调用方按客户端替换）。 */
@@ -172,10 +165,7 @@ public final class ResponseTemplate {
         ByteBuf frame = toFrame(json, offsets);
 
         ByteBuf oldFrame = this.fullFrame;
-        ByteBuf oldBody = this.bodyView;
         this.fullFrame = frame;
-        this.bodyView = frame.retainedSlice(offsets.prefixLength, frame.readableBytes() - offsets.prefixLength);
-        this.prefixLength = offsets.prefixLength;
         this.protocolOffset = offsets.protocol + offsets.jsonOffset;
         this.onlineOffset = offsets.online + offsets.jsonOffset;
         this.maxOffset = offsets.max + offsets.jsonOffset;
@@ -184,7 +174,6 @@ public final class ResponseTemplate {
         // 协议视图基于旧内存，全部作废，下次 ping 按需重建
         this.protocolViews.values().forEach(ByteBuf::release);
         this.protocolViews.clear();
-        oldBody.release();
         oldFrame.release();
     }
 
@@ -202,9 +191,8 @@ public final class ResponseTemplate {
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
         int bodyLength = 1 + varIntBytes(bytes.length) + bytes.length;
         int frameLength = varIntBytes(bodyLength) + bodyLength;
-        offsets.prefixLength = frameLength - bodyLength;
         // 帧布局：[varint bodyLen][packet id][varint jsonLen][json]
-        offsets.jsonOffset = offsets.prefixLength + 1 + varIntBytes(bytes.length);
+        offsets.jsonOffset = (frameLength - bodyLength) + 1 + varIntBytes(bytes.length);
         // 渲染期记录的 char 偏移统一换算为帧内绝对字节偏移（JSON 可含多字节内容）
         offsets.online = byteOffsetOf(json, offsets.online);
         offsets.max = byteOffsetOf(json, offsets.max);
@@ -308,17 +296,12 @@ public final class ResponseTemplate {
 
     public void dispose() {
         ByteBuf frame = this.fullFrame;
-        ByteBuf body = this.bodyView;
         this.protocolViews.values().forEach(ByteBuf::release);
         this.protocolViews.clear();
-        if (body != null && body.refCnt() != 0) {
-            body.release();
-        }
         if (frame != null && frame.refCnt() != 0) {
             frame.release();
         }
         this.fullFrame = null;
-        this.bodyView = null;
         this.compatPing = null;
     }
 
@@ -327,7 +310,6 @@ public final class ResponseTemplate {
         int protocol = -1;
         int online = -1;
         int max = -1;
-        int prefixLength;
         int jsonOffset;
     }
 }

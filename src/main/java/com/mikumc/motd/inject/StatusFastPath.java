@@ -125,16 +125,10 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         int packetId = readVarInt(buf);
         if (packetId == PACKET_PING_REQUEST && buf.readableBytes() == 8) {
             long time = buf.readLong();
-            if (this.plugin.directWrite()) {
-                // 直写模式：自建含长度前缀的完整帧
-                ByteBuf pong = ctx.alloc().directBuffer(10);
-                pong.writeByte(9).writeByte(PACKET_PING_REQUEST).writeLong(time);
-                this.writeResponse(ctx, pong);
-            } else {
-                // 管线模式：心跳包与请求包格式相同（仅包号不同，恰为 0x01），原样写回由帧编码器补前缀
-                buf.resetReaderIndex();
-                ctx.writeAndFlush(buf.retain(), ctx.voidPromise());
-            }
+            // 自建含长度前缀的完整帧（本处理器位于 pipeline 前段，outbound 不经过帧编码器）
+            ByteBuf pong = ctx.alloc().directBuffer(10);
+            pong.writeByte(9).writeByte(PACKET_PING_REQUEST).writeLong(time);
+            this.writeResponse(ctx, pong);
             buf.release();
             ctx.channel().close();
         } else if (packetId == PACKET_STATUS_REQUEST && this.plugin.allowImproperPings()) {
@@ -153,7 +147,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             ctx.channel().close();
             return;
         }
-        ByteBuf response = template.acquire(this.protocol, this.plugin.directWrite());
+        ByteBuf response = template.acquire(this.protocol);
         if (response == null) {
             ctx.channel().close();
             return;
@@ -171,6 +165,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             outbound.addMessage(msg, msg.readableBytes(), ctx.voidPromise());
             ctx.channel().flush();
         } else {
+            // 走标准写出路径（本处理器向 head 方向传播，帧编码器不在路径上，帧必须自带长度前缀）
             ctx.writeAndFlush(msg, ctx.voidPromise());
         }
     }
