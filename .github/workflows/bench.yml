@@ -1,0 +1,40 @@
+name: Bench
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '9.8.0'
+      - name: Build plugin
+        run: gradle build --no-daemon
+      - name: Fetch proxy
+        run: |
+          mkdir -p bench-run
+          curl -sL --retry 3 -o bench-run/velocity.jar \
+            "https://fill-data.papermc.io/v1/objects/35a5596a5468a035d8a32c8de5ebb0dc6b8d8f0cc3ff5169d514aca762af8aa8/velocity-4.2.0-30.jar"
+      - name: Run comparison
+        run: |
+          chmod +x .github/scripts/bench.sh
+          bash .github/scripts/bench.sh
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f bench-run/summary.md ]; then
+            cat bench-run/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "压测未产出结果，请查看上方日志" >> "$GITHUB_STEP_SUMMARY"
+          fi
