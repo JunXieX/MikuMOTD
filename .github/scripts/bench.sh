@@ -26,7 +26,7 @@ if [ ! -x "$JCMD" ]; then
   exit 1
 fi
 
-"$JCMD" -d "$WORK" bench/MotdBench.java
+"${JAVA_HOME}/bin/javac" -d "$WORK" bench/MotdBench.java
 
 # 场景目录：bare=无插件；compat=事件模式；fast=快速路径。
 # compat/fast 使用同一份精简配置（无图标、短描述），排除载荷大小差异。
