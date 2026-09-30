@@ -1,3 +1,6 @@
+import java.net.URI
+import java.security.MessageDigest
+
 plugins {
     `java-library`
 }
@@ -29,8 +32,8 @@ val downloadVelocityProxy = tasks.register("downloadVelocityProxy") {
         val target = velocityJar.get().asFile
         if (!target.exists() || target.length() != velocityJarSize) {
             target.parentFile.mkdirs()
-            val digest = java.security.MessageDigest.getInstance("SHA-256")
-            java.net.URI.create(velocityJarUrl).toURL().openStream().use { input ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            URI.create(velocityJarUrl).toURL().openStream().use { input ->
                 target.outputStream().use { output ->
                     val buffer = ByteArray(64 * 1024)
                     while (true) {
