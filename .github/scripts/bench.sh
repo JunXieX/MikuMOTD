@@ -68,26 +68,38 @@ start_proxy() {
     if grep -q "Done" "$log" 2>/dev/null; then
       return 0
     fi
+    if ! kill -0 "$(cat "$WORK/$name.pid")" 2>/dev/null; then
+      echo "代理进程提前退出: $name" >&2
+      tail -20 "$log" >&2 || true
+      return 1
+    fi
     sleep 1
   done
   echo "代理启动超时: $name" >&2
   tail -20 "$log" >&2 || true
-  exit 1
+  return 1
 }
 
 stop_proxy() {
   local name=$1
   if [ -f "$WORK/$name.pid" ]; then
-    kill "$(cat "$WORK/$name.pid")" 2>/dev/null || true
+    local pid
+    pid=$(cat "$WORK/$name.pid")
+    kill "$pid" 2>/dev/null || true
+    sleep 2
+    # Velocity 的优雅关闭可能等待内部任务超过可接受时长，基准切换场景直接强杀
+    kill -9 "$pid" 2>/dev/null || true
     rm -f "$WORK/$name.pid"
   fi
+  pkill -9 -f "velocity.jar" 2>/dev/null || true
   # 等端口释放，避免影响下一场景
-  for _ in $(seq 1 20); do
-    if ! (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  for _ in $(seq 1 30); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+      exec 3>&- 3<&- || true
+      sleep 1
+    else
       break
     fi
-    exec 3>&- 3<&- || true
-    sleep 1
   done
   sleep 1
 }
