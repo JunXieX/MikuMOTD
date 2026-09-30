@@ -55,20 +55,25 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             return;
         }
 
+        // 快速路径独占该缓冲；透传分支将所有权交给下游后不再负责释放
+        boolean owned = true;
         try {
             switch (this.phase) {
-                case HANDSHAKE -> this.readHandshake(ctx, buf);
+                case HANDSHAKE -> owned = this.readHandshake(ctx, buf);
                 case REQUEST -> this.readRequest(ctx, buf);
                 case PING -> this.readPing(ctx, buf);
             }
         } catch (Exception e) {
-            buf.release();
+            if (owned) {
+                buf.release();
+            }
             this.plugin.logFastPathFault(ctx.channel().remoteAddress(), e);
             ctx.channel().close();
         }
     }
 
-    private void readHandshake(ChannelHandlerContext ctx, ByteBuf buf) throws Exception {
+    /** 处理握手包。返回 false 表示缓冲所有权已转移给原生管线（登录/传输透传）。 */
+    private boolean readHandshake(ChannelHandlerContext ctx, ByteBuf buf) throws Exception {
         buf.markReaderIndex();
         int packetId = readVarInt(buf);
         if (packetId != PACKET_STATUS_REQUEST) {
@@ -89,12 +94,20 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             this.phase = Phase.REQUEST;
             buf.release();
             this.plugin.onStatusHandshake(ctx.channel().remoteAddress(), protocol);
-        } else {
-            // 登录或传输意图：还原字节位置，交还原生握手流程并退出快速路径
-            buf.resetReaderIndex();
-            ctx.pipeline().remove(this);
-            ctx.fireChannelRead(buf);
+            return true;
         }
+
+        // 登录或传输意图：还原字节位置，交还原生握手流程并退出快速路径。
+        // fireChannelRead 之后缓冲所有权归下游（其解码器保证释放），本处理器不再释放
+        buf.resetReaderIndex();
+        ctx.pipeline().remove(this);
+        try {
+            ctx.fireChannelRead(buf);
+        } catch (Exception e) {
+            this.plugin.logFastPathFault(ctx.channel().remoteAddress(), e);
+            ctx.channel().close();
+        }
+        return false;
     }
 
     private void readRequest(ChannelHandlerContext ctx, ByteBuf buf) throws Exception {

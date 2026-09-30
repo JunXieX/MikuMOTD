@@ -37,55 +37,61 @@ public final class PingRegistry {
     }
 
     /** 由配置构建注册表；所有模板渲染在本方法（配置线程）内完成。 */
-    public static PingRegistry build(MikuConfig config, TemplateFactory factory) {
+    public static PingRegistry build(MikuConfig config, TemplateFactory factory, org.slf4j.Logger logger) {
         Map<String, PingProfile> cache = new HashMap<>();
         List<PingProfile> all = new ArrayList<>();
 
+        // 维护模式隐藏真实协议（show-real-version=false）时，维护集使用固定协议号的模板
         Snapshot normal = buildSnapshot(config.defaultProfile(), config.protocolProfiles(),
-                config.domainProfiles(), factory, cache, all);
+                config.domainProfiles(), false, factory, cache, all, logger);
         Snapshot maintenance = buildSnapshot(config.maintenanceProfile(), config.maintenanceProtocolProfiles(),
-                config.maintenanceDomainProfiles(), factory, cache, all);
+                config.maintenanceDomainProfiles(), !config.maintenanceShowRealVersion(),
+                factory, cache, all, logger);
         return new PingRegistry(new State(normal, maintenance, List.copyOf(all)));
     }
 
     private static Snapshot buildSnapshot(ProfileData defaultData,
                                           Map<String, ProfileData> protocolData,
                                           Map<String, ProfileData> domainData,
+                                          boolean fixedProtocol,
                                           TemplateFactory factory,
                                           Map<String, PingProfile> cache,
-                                          List<PingProfile> all) {
-        PingProfile defaultProfile = internProfile(defaultData, factory, cache, all);
+                                          List<PingProfile> all,
+                                          org.slf4j.Logger logger) {
+        PingProfile defaultProfile = internProfile(defaultData, fixedProtocol, factory, cache, all);
 
         Int2ObjectOpenHashMap<PingProfile> protocols = new Int2ObjectOpenHashMap<>();
         protocolData.forEach((range, data) -> {
-            PingProfile profile = internProfile(data, factory, cache, all);
-            for (int protocol : expandRange(range)) {
+            PingProfile profile = internProfile(data, fixedProtocol, factory, cache, all);
+            for (int protocol : expandRange(range, logger)) {
                 protocols.put(protocol, profile);
             }
         });
 
         Map<String, PingProfile> domains = new LinkedHashMap<>();
         domainData.forEach((host, data) ->
-                domains.put(host.toLowerCase(Locale.ROOT), internProfile(data, factory, cache, all)));
+                domains.put(host.toLowerCase(Locale.ROOT),
+                        internProfile(data, fixedProtocol, factory, cache, all)));
 
         return new Snapshot(defaultProfile, protocols, domains);
     }
 
-    /** 相同内容的画像共享一个实例。 */
-    private static PingProfile internProfile(ProfileData data, TemplateFactory factory,
+    /** 相同内容的画像共享一个实例（固定协议与真实协议是不同变体，不共享）。 */
+    private static PingProfile internProfile(ProfileData data, boolean fixedProtocol, TemplateFactory factory,
                                              Map<String, PingProfile> cache, List<PingProfile> all) {
         String key = data.versionName() + '\u0000'
                 + String.join("\u0001", data.descriptions()) + '\u0000'
                 + String.join("\u0001", data.favicons()) + '\u0000'
-                + String.join("\u0001", data.playerList());
+                + String.join("\u0001", data.playerList()) + '\u0000'
+                + fixedProtocol;
         return cache.computeIfAbsent(key, ignored -> {
-            PingProfile profile = new PingProfile(factory.compile(data, false));
+            PingProfile profile = new PingProfile(factory.compile(data, fixedProtocol));
             all.add(profile);
             return profile;
         });
     }
 
-    private static int[] expandRange(String spec) {
+    private static int[] expandRange(String spec, org.slf4j.Logger logger) {
         String trimmed = spec.trim();
         int dash = trimmed.indexOf('-');
         int from;
@@ -104,6 +110,8 @@ public final class PingRegistry {
             throw new IllegalArgumentException("协议段范围无效: " + spec);
         }
         if (to - from + 1 > MAX_RANGE_SPAN) {
+            logger.warn("协议段 {} 覆盖 {} 个版本，超出上限 {}，已截断到 {}",
+                    spec, to - from + 1, MAX_RANGE_SPAN, from + MAX_RANGE_SPAN - 1);
             to = from + MAX_RANGE_SPAN - 1;
         }
         int[] result = new int[to - from + 1];

@@ -63,7 +63,7 @@ public final class TemplateFactory {
                                            List<String> sampleRows, boolean fixedProtocol) {
         String descriptionJson = GSON.serialize(this.format.deserialize(clean(description)));
         List<String> escapedRows = escapeRows(sampleRows);
-        String escapedVersion = ResponseTemplate.escapeJson(versionName);
+        String escapedVersion = ResponseTemplate.escapeJson(clean(versionName));
 
         Offsets offsets = ResponseTemplate.newOffsets();
         int placeholderProtocol = fixedProtocol ? 1 : 0;
@@ -78,7 +78,7 @@ public final class TemplateFactory {
                                             String faviconUrl, List<String> sampleRows) {
         String descriptionJson = GSON.serialize(this.format.deserialize(clean(description)));
         List<String> escapedRows = escapeRows(sampleRows);
-        String escapedVersion = ResponseTemplate.escapeJson(versionName);
+        String escapedVersion = ResponseTemplate.escapeJson(clean(versionName));
 
         Offsets offsets = ResponseTemplate.newOffsets();
         String json = renderJson(escapedVersion, descriptionJson, faviconUrl, escapedRows,
@@ -96,9 +96,20 @@ public final class TemplateFactory {
                         .replace("{online}", String.valueOf(online))
                         .replace("{max}", String.valueOf(max))));
         List<String> escapedRows = escapeRows(source.playerList(), online, max);
-        String escapedVersion = ResponseTemplate.escapeJson(source.versionName());
+        String escapedVersion = ResponseTemplate.escapeJson(clean(source.versionName()));
         return renderJson(escapedVersion, descriptionJson, source.faviconUrl(), escapedRows,
                 online, max, placeholderProtocol, offsets);
+    }
+
+    /** 动态模板重建时同步重建事件模式兜底用的 ServerPing（低频）。 */
+    ServerPing rebuildCompat(DynamicSource source, int online, int max) {
+        String descriptionJson = GSON.serialize(
+                this.format.deserialize(clean(source.descriptionWithPlaceholders())
+                        .replace("{online}", String.valueOf(online))
+                        .replace("{max}", String.valueOf(max))));
+        List<String> escapedRows = escapeRows(source.playerList(), online, max);
+        return buildCompat(descriptionJson, escapedRows, source.faviconUrl(),
+                clean(source.versionName()), online, max, 0);
     }
 
     private String renderJson(String escapedVersion, String descriptionJson, String faviconUrl,
@@ -192,7 +203,8 @@ public final class TemplateFactory {
     }
 
     private static boolean isDynamic(ProfileData profile) {
-        return containsPlaceholder(String.join("", profile.descriptions()))
+        return containsPlaceholder(profile.versionName())
+                || containsPlaceholder(String.join("", profile.descriptions()))
                 || containsPlaceholder(String.join("", profile.playerList()));
     }
 

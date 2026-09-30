@@ -30,8 +30,9 @@ public final class CompatListener {
 
         InboundConnection connection = event.getConnection();
         int protocol = connection.getProtocolVersion().getProtocol();
+        // getHostString 不触发 DNS 反查，事件模式热路径必须避免阻塞
         String hostKey = connection.getVirtualHost()
-                .map(address -> (address.getHostName() + ":" + address.getPort())
+                .map(address -> (address.getHostString() + ":" + address.getPort())
                         .toLowerCase(Locale.ROOT))
                 .orElse(null);
 

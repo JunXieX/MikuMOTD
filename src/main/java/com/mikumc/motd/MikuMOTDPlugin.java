@@ -18,11 +18,11 @@ import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.scheduler.ScheduledTask;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.file.Path;
 import java.util.List;
-import com.velocitypowered.api.scheduler.ScheduledTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import net.kyori.adventure.text.Component;
@@ -69,21 +69,26 @@ public final class MikuMOTDPlugin {
 
     @Subscribe
     public void onInitialize(ProxyInitializeEvent event) {
+        boolean loaded;
         try {
             this.reload();
-        } catch (IOException e) {
-            this.logger.error("配置加载失败，插件未启用", e);
-            return;
+            loaded = true;
+        } catch (Exception e) {
+            // 白名单非法、配置类型错误等都走这里；保底注册事件模式与命令，让 /mikumotd reload 可用
+            this.logger.error("配置加载失败，修正 plugins/mikumotd/config.conf 后执行 /mikumotd reload", e);
+            loaded = false;
         }
 
         MikuConfig config = this.config;
-        if (!config.compatMode()) {
+        if (loaded && !config.compatMode()) {
             if (Injector.inject(this, this.proxy) != null) {
                 this.fastPath = true;
                 this.logger.info("快速路径已启用（字节级状态响应）");
             }
-        } else {
+        } else if (loaded) {
             this.logger.info("已按配置强制使用事件模式");
+        } else {
+            this.logger.warn("配置未加载，已仅注册事件模式兜底与命令");
         }
         if (!this.fastPath) {
             this.proxy.getEventManager().register(this, new CompatListener(this));
@@ -125,7 +130,7 @@ public final class MikuMOTDPlugin {
 
             TemplateFactory factory = new TemplateFactory(
                     this.dataDirectory, config.textFormat(), config.pngQuality(), this.logger);
-            PingRegistry fresh = PingRegistry.build(config, factory);
+            PingRegistry fresh = PingRegistry.build(config, factory, this.logger);
             // 维护状态跟随配置初始化；游戏内切换只改运行时标志，重启后回到配置值
             boolean maintenance = config.maintenanceEnabled();
             this.maintenanceOverride = maintenance;
@@ -267,7 +272,8 @@ public final class MikuMOTDPlugin {
     public Component kickMessage() {
         MikuConfig config = this.config;
         String raw = config != null ? config.kickMessage() : "服务器维护中";
-        return TextFormat.MINIMESSAGE.deserialize(raw.replace("{NL}", "\n"));
+        TextFormat format = config != null ? config.textFormat() : TextFormat.MINIMESSAGE;
+        return format.deserialize(raw.replace("{NL}", "\n"));
     }
 
     // ---------------------------------------------------------------------

@@ -20,8 +20,9 @@ import java.lang.reflect.Field;
  *
  * <p>Velocity 在监听端口绑定之前触发插件初始化事件，因此替换
  * {@link ServerChannelInitializerHolder} 中的初始化器即可覆盖所有后续连接。
- * 访问链中唯一的私有成员（ConnectionManager#cm 与 holder 的初始化器字段）
- * 通过一次性反射获取；字段反射失败时回退到公开的 set() 方法。</p>
+ * 访问链中的私有成员（ConnectionManager#cm 与 holder 的初始化器字段）通过一次性
+ * 反射获取；字段写入失败时回退到 holder 的公开 set() 方法。
+ * 任何注入失败都返回 null，由调用方转入事件模式兜底。</p>
  */
 public final class Injector {
 
@@ -54,12 +55,19 @@ public final class Injector {
 
             ServerChannelInitializerHolder holder = cm.serverChannelInitializer;
             ChannelInitializer<Channel> original = holder.get();
+            Hook hook = new Hook(plugin, original);
 
             Field initializerField = ServerChannelInitializerHolder.class.getDeclaredField("initializer");
             initializerField.setAccessible(true);
-            initializerField.set(holder, new Hook(plugin, original));
+            try {
+                initializerField.set(holder, hook);
+            } catch (IllegalAccessException fallback) {
+                // 反射写入不可用时走公开 setter（会打印一行代理的替换警告日志，功能等价）
+                holder.set(hook);
+            }
             return original;
-        } catch (ReflectiveOperationException | RuntimeException e) {
+        } catch (Throwable e) {
+            // 类结构变化（Error 级）也统一回退事件模式，保证插件仍可用
             plugin.logger().error("快速路径注入失败，已回退到事件模式（功能不受影响，仅吞吐较低）", e);
             return null;
         }

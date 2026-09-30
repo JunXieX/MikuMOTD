@@ -18,8 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 不同客户端协议号则按需生成独立的协议视图（每种协议至多复制一次）。
  * ping 路径上只做一次零拷贝切片（duplicate/slice），没有任何解码、序列化与字符串操作。</p>
  *
- * <p>JSON 的字段顺序经过安排：所有定宽数字字段位于任何非 ASCII 字符之前，
- * 因此渲染期记录的 char 偏移即最终帧内的 byte 偏移，无需事后扫描。</p>
+ * <p>JSON 的字段偏移在渲染期按 char 记录、组帧时统一换算为 UTF-8 字节偏移，
+ * 因此数字槽位可以位于任何多字节内容之后。</p>
  *
  * <p>线程模型：构造与 {@link #dispose} 在配置线程；{@link #update} 在调度线程（低频）；
  * {@link #acquire} 与 {@link #acquireCompat} 在连接的事件循环线程（高频）。
@@ -43,8 +43,9 @@ public final class ResponseTemplate {
     ) {
     }
 
-    private final int prefixLength;
-    // 动态模板整体重建时会随新帧更新；静态模板构造后不变
+    // 动态模板整体重建时会随新帧更新（帧长度跨 VarInt 边界时前缀长度会变化）；
+    // 静态模板构造后不变
+    private int prefixLength;
     private int protocolOffset;
     private int onlineOffset;
     private int maxOffset;
@@ -105,10 +106,11 @@ public final class ResponseTemplate {
                     // 协议视图超上限（疑似扫描流量），退化为不带协议改写的共享模板
                     source = frame;
                 } else {
-                    view = this.protocolViews.computeIfAbsent(protocol, this::makeView);
+                    source = this.protocolViews.computeIfAbsent(protocol, key -> makeView(frame, key));
                 }
+            } else {
+                source = view;
             }
-            source = view != null ? view : frame;
         }
 
         return direct
@@ -173,16 +175,12 @@ public final class ResponseTemplate {
         ByteBuf oldBody = this.bodyView;
         this.fullFrame = frame;
         this.bodyView = frame.retainedSlice(offsets.prefixLength, frame.readableBytes() - offsets.prefixLength);
+        this.prefixLength = offsets.prefixLength;
         this.protocolOffset = offsets.protocol + offsets.jsonOffset;
         this.onlineOffset = offsets.online + offsets.jsonOffset;
         this.maxOffset = offsets.max + offsets.jsonOffset;
-        ServerPing base = this.compatPing;
-        if (base != null) {
-            this.compatPing = base.asBuilder()
-                    .onlinePlayers(online)
-                    .maximumPlayers(max)
-                    .build();
-        }
+        // 事件模式兜底同步重渲染：描述内嵌的占位符文本需要跟随最新人数
+        this.compatPing = this.dynamicSource.factory().rebuildCompat(this.dynamicSource, online, max);
         // 协议视图基于旧内存，全部作废，下次 ping 按需重建
         this.protocolViews.values().forEach(ByteBuf::release);
         this.protocolViews.clear();
@@ -190,8 +188,8 @@ public final class ResponseTemplate {
         oldFrame.release();
     }
 
-    private ByteBuf makeView(int protocol) {
-        ByteBuf view = this.fullFrame.copy();
+    private ByteBuf makeView(ByteBuf frame, int protocol) {
+        ByteBuf view = frame.copy();
         writePaddedInt(view, this.protocolOffset, PROTOCOL_WIDTH, protocol);
         return view;
     }
