@@ -104,11 +104,9 @@ public final class TemplateFactory {
     private String renderJson(String escapedVersion, String descriptionJson, String faviconUrl,
                               List<String> escapedRows, int online, int max,
                               int placeholderProtocol, Offsets offsets) {
+        // 偏移按 char 记录，toFrame 会统一换算为 UTF-8 字节偏移（槽位可位于多字节内容之后）
         StringBuilder sb = new StringBuilder(1024 + descriptionJson.length());
-        sb.append("{\"version\":{\"protocol\":");
-        offsets.protocol = sb.length();
-        sb.append("         ");
-        sb.append(",\"name\":\"").append(escapedVersion).append("\"},\"players\":{\"online\":");
+        sb.append("{\"players\":{\"online\":");
         offsets.online = sb.length();
         sb.append("        ");
         sb.append(",\"max\":");
@@ -122,15 +120,19 @@ public final class TemplateFactory {
             sb.append("{\"id\":\"").append(UUID.randomUUID()).append("\",\"name\":\"")
                     .append(escapedRows.get(i)).append("\"}");
         }
-        sb.append("]},\"description\":").append(descriptionJson);
+        sb.append("]},\"version\":{\"protocol\":");
+        offsets.protocol = sb.length();
+        sb.append("         ");
+        sb.append(",\"name\":\"").append(escapedVersion).append("\"},\"description\":")
+                .append(descriptionJson);
         if (faviconUrl != null) {
             sb.append(",\"favicon\":\"").append(faviconUrl).append('"');
         }
         sb.append('}');
 
-        ResponseTemplate.writeAsciiNumber(sb, offsets.protocol, 9, Math.max(0, placeholderProtocol));
         ResponseTemplate.writeAsciiNumber(sb, offsets.online, 8, Math.max(0, online));
         ResponseTemplate.writeAsciiNumber(sb, offsets.max, 8, Math.max(0, max));
+        ResponseTemplate.writeAsciiNumber(sb, offsets.protocol, 9, Math.max(0, placeholderProtocol));
         return sb.toString();
     }
 

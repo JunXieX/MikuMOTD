@@ -245,6 +245,10 @@ public final class MikuConfig {
     }
 
     private List<String> readStringList(CommentedConfigurationNode node, List<String> fallback) throws IOException {
+        // 未配置（节点不存在）取默认值；显式配置为空列表（如无玩家列表）则尊重配置
+        if (node.virtual()) {
+            return fallback;
+        }
         List<String> list = node.getList(String.class);
         return list == null ? fallback : list;
     }
@@ -318,7 +322,9 @@ public final class MikuConfig {
                 "假人数百分比加值，基于（真实人数+固定加值）");
 
         writeProfile(root.node("motd"), this.defaultProfile,
-                "默认 MOTD。描述/玩家列表支持占位符 {online} {max} 与换行符 {NL}");
+                "默认 MOTD。描述/玩家列表支持占位符 {online} {max} 与换行符 {NL}\n"
+                + "另有可选节 protocol-motd（按协议段，key 如 \"757-800\"）与 domain-motd（按域名，key 如 \"play.example.com:25565\"），\n"
+                + "节点结构与本节相同，域名匹配不区分大小写");
         writeProfileMap(root.node("protocol-motd"), this.protocolProfiles,
                 "按协议版本段的 MOTD，key 为段（如 \"757-800\"）或单值（如 \"761\"），节点同 motd");
         writeProfileMap(root.node("domain-motd"), this.domainProfiles,
@@ -355,6 +361,11 @@ public final class MikuConfig {
     }
 
     private void writeProfileMap(CommentedConfigurationNode node, Map<String, ProfileData> profiles, String comment) throws IOException {
+        // 空映射时不写出节点：写出空对象会被序列化为 "key=null"，
+        // 用户之后手动添加同名对象节会被 HOCON 的 null 值覆盖
+        if (profiles.isEmpty()) {
+            return;
+        }
         node.comment(comment);
         for (Map.Entry<String, ProfileData> entry : profiles.entrySet()) {
             writeProfile(node.node(entry.getKey()), entry.getValue(), null);

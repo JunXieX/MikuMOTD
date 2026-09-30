@@ -70,6 +70,10 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
 
     private void readHandshake(ChannelHandlerContext ctx, ByteBuf buf) throws Exception {
         buf.markReaderIndex();
+        int packetId = readVarInt(buf);
+        if (packetId != PACKET_STATUS_REQUEST) {
+            throw new IndexOutOfBoundsException("握手包号异常 0x" + Integer.toHexString(packetId));
+        }
         int protocol = readVarInt(buf);
         String host = readString(buf);
         if (buf.readableBytes() < 3) {

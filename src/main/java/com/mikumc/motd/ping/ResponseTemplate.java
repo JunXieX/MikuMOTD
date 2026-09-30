@@ -44,9 +44,10 @@ public final class ResponseTemplate {
     }
 
     private final int prefixLength;
-    private final int protocolOffset;
-    private final int onlineOffset;
-    private final int maxOffset;
+    // 动态模板整体重建时会随新帧更新；静态模板构造后不变
+    private int protocolOffset;
+    private int onlineOffset;
+    private int maxOffset;
     private final boolean fixedProtocol;
     private final boolean dynamic;
     private final DynamicSource dynamicSource;
@@ -61,9 +62,10 @@ public final class ResponseTemplate {
         this.fullFrame = frame;
         this.bodyView = frame.retainedSlice(offsets.prefixLength, frame.readableBytes() - offsets.prefixLength);
         this.prefixLength = offsets.prefixLength;
-        this.protocolOffset = offsets.protocol + offsets.prefixLength;
-        this.onlineOffset = offsets.online + offsets.prefixLength;
-        this.maxOffset = offsets.max + offsets.prefixLength;
+        // 渲染期偏移相对 JSON 起点，帧内绝对偏移需加上帧前缀、包号与 JSON 长度前缀
+        this.protocolOffset = offsets.protocol + offsets.jsonOffset;
+        this.onlineOffset = offsets.online + offsets.jsonOffset;
+        this.maxOffset = offsets.max + offsets.jsonOffset;
         this.fixedProtocol = fixedProtocol;
         this.dynamic = source != null;
         this.dynamicSource = source;
@@ -171,6 +173,9 @@ public final class ResponseTemplate {
         ByteBuf oldBody = this.bodyView;
         this.fullFrame = frame;
         this.bodyView = frame.retainedSlice(offsets.prefixLength, frame.readableBytes() - offsets.prefixLength);
+        this.protocolOffset = offsets.protocol + offsets.jsonOffset;
+        this.onlineOffset = offsets.online + offsets.jsonOffset;
+        this.maxOffset = offsets.max + offsets.jsonOffset;
         ServerPing base = this.compatPing;
         if (base != null) {
             this.compatPing = base.asBuilder()
@@ -200,6 +205,12 @@ public final class ResponseTemplate {
         int bodyLength = 1 + varIntBytes(bytes.length) + bytes.length;
         int frameLength = varIntBytes(bodyLength) + bodyLength;
         offsets.prefixLength = frameLength - bodyLength;
+        // 帧布局：[varint bodyLen][packet id][varint jsonLen][json]
+        offsets.jsonOffset = offsets.prefixLength + 1 + varIntBytes(bytes.length);
+        // 渲染期记录的 char 偏移统一换算为帧内绝对字节偏移（JSON 可含多字节内容）
+        offsets.online = byteOffsetOf(json, offsets.online);
+        offsets.max = byteOffsetOf(json, offsets.max);
+        offsets.protocol = byteOffsetOf(json, offsets.protocol);
 
         ByteBuf frame = Unpooled.directBuffer(frameLength);
         writeVarInt(frame, bodyLength);
@@ -207,6 +218,26 @@ public final class ResponseTemplate {
         writeVarInt(frame, bytes.length);
         frame.writeBytes(bytes);
         return frame;
+    }
+
+    /** JSON 内 char 偏移 → UTF-8 字节偏移（仅构造期调用）。 */
+    static int byteOffsetOf(String json, int charOffset) {
+        int bytes = 0;
+        for (int i = 0; i < charOffset; i++) {
+            char c = json.charAt(i);
+            if (c < 0x80) {
+                bytes += 1;
+            } else if (c < 0x800) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c) && i + 1 < charOffset
+                    && Character.isLowSurrogate(json.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
     }
 
     /** 定宽右对齐整数的原位字节覆写（最低位恒为数字，其余补空格）。 */
@@ -299,5 +330,6 @@ public final class ResponseTemplate {
         int online = -1;
         int max = -1;
         int prefixLength;
+        int jsonOffset;
     }
 }
