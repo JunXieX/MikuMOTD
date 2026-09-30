@@ -19,7 +19,14 @@ WORK=$ROOT/$DIR
 mkdir -p "$WORK"
 : > "$RESULTS"
 
-javac -d "$WORK" bench/MotdBench.java
+# 代理与压测客户端统一使用工作流指定的 JDK，避免 runner 默认 PATH 上存在旧版本 java
+JCMD="${JAVA_HOME:-}/bin/java"
+if [ ! -x "$JCMD" ]; then
+  echo "JAVA_HOME 未指向可用的 JDK: $JAVA_HOME" >&2
+  exit 1
+fi
+
+"$JCMD" -d "$WORK" bench/MotdBench.java
 
 # 场景目录：bare=无插件；compat=事件模式；fast=快速路径。
 # compat/fast 使用同一份精简配置（无图标、短描述），排除载荷大小差异。
@@ -62,7 +69,7 @@ start_proxy() {
 
   local log=$WORK/$name-server.log
   : > "$log"
-  (cd "$run_dir" && java -Xms512m -Xmx512m -jar "$WORK/velocity.jar" > "$log" 2>&1 & echo $! > "$WORK/$name.pid")
+  (cd "$run_dir" && "$JCMD" -Xms512m -Xmx512m -jar "$WORK/velocity.jar" > "$log" 2>&1 & echo $! > "$WORK/$name.pid")
 
   for _ in $(seq 1 90); do
     if grep -q "Done" "$log" 2>/dev/null; then
@@ -107,8 +114,8 @@ stop_proxy() {
 measure() {
   local name=$1 round=$2
   local lat qps fail
-  lat=$(java -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --latency "$LATENCY_RUNS" | awk '{print $2}')
-  read -r _ qps _ fail <<< "$(java -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --bench "$BENCH_SECONDS" --threads "$BENCH_THREADS")"
+  lat=$("$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --latency "$LATENCY_RUNS" | awk '{print $2}')
+  read -r _ qps _ fail <<< "$("$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --bench "$BENCH_SECONDS" --threads "$BENCH_THREADS")"
   echo "$name $round $lat $qps $fail" >> "$RESULTS"
   echo "  第 $round 轮：延迟 ${lat}µs，QPS $qps（失败 $fail）"
 }
