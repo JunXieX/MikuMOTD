@@ -22,7 +22,9 @@ public final class PingRegistry {
     private record Snapshot(
             PingProfile defaultProfile,
             Int2ObjectOpenHashMap<PingProfile> protocols,
-            Map<String, PingProfile> domains
+            Map<String, PingProfile> domains,
+            // 去重后的画像集合，人数刷新只需遍历它，避免协议段展开表的大量重复项
+            List<PingProfile> uniqueProfiles
     ) {
     }
 
@@ -73,7 +75,11 @@ public final class PingRegistry {
                 domains.put(host.toLowerCase(Locale.ROOT),
                         internProfile(data, fixedProtocol, factory, cache, all)));
 
-        return new Snapshot(defaultProfile, protocols, domains);
+        java.util.Set<PingProfile> unique = new java.util.LinkedHashSet<>();
+        unique.add(defaultProfile);
+        unique.addAll(protocols.values());
+        unique.addAll(domains.values());
+        return new Snapshot(defaultProfile, protocols, domains, List.copyOf(unique));
     }
 
     /** 相同内容的画像共享一个实例（固定协议与真实协议是不同变体，不共享）。 */
@@ -92,7 +98,7 @@ public final class PingRegistry {
         });
     }
 
-    private static int[] expandRange(String spec, org.slf4j.Logger logger) {
+    static int[] expandRange(String spec, org.slf4j.Logger logger) {
         String trimmed = spec.trim();
         int dash = trimmed.indexOf('-');
         int from;
@@ -161,11 +167,7 @@ public final class PingRegistry {
      */
     public void update(boolean maintenance, int online, int max) {
         Snapshot snapshot = maintenance ? this.state.maintenance() : this.state.normal();
-        snapshot.defaultProfile().update(online, max);
-        for (PingProfile profile : snapshot.protocols().values()) {
-            profile.update(online, max);
-        }
-        for (PingProfile profile : snapshot.domains().values()) {
+        for (PingProfile profile : snapshot.uniqueProfiles()) {
             profile.update(online, max);
         }
     }

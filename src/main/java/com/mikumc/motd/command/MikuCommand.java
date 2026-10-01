@@ -86,11 +86,23 @@ public final class MikuCommand implements SimpleCommand {
 
     @Override
     public List<String> suggest(Invocation invocation) {
+        CommandSource source = invocation.source();
         if (invocation.arguments().length > 1) {
             return List.of();
         }
         String prefix = invocation.arguments().length == 0 ? "" : invocation.arguments()[0].toLowerCase(Locale.ROOT);
-        return SUGGESTIONS.stream().filter(s -> s.startsWith(prefix)).toList();
+        return SUGGESTIONS.stream()
+                .filter(s -> s.startsWith(prefix))
+                .filter(s -> source.hasPermission("mikumotd.command." + s))
+                .toList();
+    }
+
+    /** 任一子命令权限即视为可用（具体子命令仍在其分支内二次校验）。 */
+    @Override
+    public boolean hasPermission(Invocation invocation) {
+        return invocation.source().hasPermission("mikumotd.command.info")
+                || invocation.source().hasPermission("mikumotd.command.reload")
+                || invocation.source().hasPermission("mikumotd.command.maintenance");
     }
 
     private void deny(CommandSource source) {

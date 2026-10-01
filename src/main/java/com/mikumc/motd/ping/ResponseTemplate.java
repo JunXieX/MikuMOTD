@@ -8,7 +8,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * 单条 MOTD 响应的字节级模板。
@@ -54,6 +56,10 @@ public final class ResponseTemplate {
 
     private volatile ByteBuf fullFrame;
     private final Map<Integer, ByteBuf> protocolViews = new ConcurrentHashMap<>();
+    /** 协议视图的插入顺序，用于容量上限的先进先出淘汰。 */
+    private final Queue<Integer> viewOrder = new ConcurrentLinkedQueue<>();
+    /** 动态模板上次重建的指纹（人数 + 真实玩家名单），相同则跳过重建。 */
+    private volatile long lastRebuildStamp = Long.MIN_VALUE;
     private volatile ServerPing compatPing;
 
     private ResponseTemplate(ByteBuf frame, Offsets offsets, boolean fixedProtocol, DynamicSource source) {
@@ -99,17 +105,28 @@ public final class ResponseTemplate {
         } else {
             ByteBuf view = this.protocolViews.get(protocol);
             if (view == null) {
-                if (this.protocolViews.size() >= MAX_VIEWS) {
-                    // 协议视图超上限（疑似扫描流量），退化为不带协议改写的共享模板
-                    source = frame;
-                } else {
-                    source = this.protocolViews.computeIfAbsent(protocol, key -> makeView(frame, key));
-                }
+                source = this.protocolViews.computeIfAbsent(protocol, key -> makeView(frame, key));
+                this.viewOrder.add(protocol);
+                evictViews();
             } else {
                 source = view;
             }
         }
         return source.retainedDuplicate();
+    }
+
+    /** 视图数量超上限时按插入顺序淘汰（引用计数保证在飞响应不受影响）。 */
+    private void evictViews() {
+        while (this.protocolViews.size() > MAX_VIEWS) {
+            Integer oldest = this.viewOrder.poll();
+            if (oldest == null) {
+                break;
+            }
+            ByteBuf removed = this.protocolViews.remove(oldest);
+            if (removed != null) {
+                removed.release();
+            }
+        }
     }
 
     /** 事件模式兜底用的 ServerPing（协议号仍需调用方按客户端替换）。 */
@@ -131,12 +148,18 @@ public final class ResponseTemplate {
     }
 
     /**
-     * 人数变化：静态模板原位覆写数字；动态模板整体重建。
+     * 人数变化：静态模板原位覆写数字；动态模板整体重建（人数与玩家名单指纹未变时跳过）。
      * 所有已生成的协议视图同步覆写，保证任何协议视图都显示最新人数。
      */
     public void update(int online, int max) {
         if (this.dynamic) {
+            long fingerprint = this.dynamicSource.factory().sampleFingerprint(this.dynamicSource);
+            long stamp = (long) online * 1_000_000_007L + (long) max * 10_000_000_019L + fingerprint;
+            if (stamp == this.lastRebuildStamp) {
+                return;
+            }
             rebuild(online, max);
+            this.lastRebuildStamp = stamp;
             return;
         }
 
@@ -175,6 +198,7 @@ public final class ResponseTemplate {
         // 协议视图基于旧内存，全部作废，下次 ping 按需重建
         this.protocolViews.values().forEach(ByteBuf::release);
         this.protocolViews.clear();
+        this.viewOrder.clear();
         oldFrame.release();
     }
 
@@ -299,6 +323,7 @@ public final class ResponseTemplate {
         ByteBuf frame = this.fullFrame;
         this.protocolViews.values().forEach(ByteBuf::release);
         this.protocolViews.clear();
+        this.viewOrder.clear();
         if (frame != null && frame.refCnt() != 0) {
             frame.release();
         }

@@ -54,6 +54,7 @@ val downloadVelocityProxy = tasks.register("downloadVelocityProxy") {
 }
 
 tasks.named("compileJava") { dependsOn(downloadVelocityProxy) }
+tasks.withType<JavaCompile>().configureEach { dependsOn(downloadVelocityProxy) }
 
 repositories {
     maven("https://repo.papermc.io/repository/maven-public/") { name = "papermc" }
@@ -64,6 +65,18 @@ dependencies {
     compileOnly(files(velocityJar))
     // 注解处理器生成 velocity-plugin.json，走公开的 velocity-api 构件即可
     annotationProcessor("com.velocitypowered:velocity-api:$velocityVersion")
+    // 测试同样需要代理 fat jar 提供的运行时类（netty/adventure/configurate）
+    testImplementation(files(velocityJar))
+    testImplementation(platform("org.junit:junit-bom:5.11.4"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "skipped", "failed")
+    }
 }
 
 tasks.jar {

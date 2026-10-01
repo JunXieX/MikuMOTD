@@ -10,6 +10,7 @@ import com.velocitypowered.api.proxy.server.ServerPing;
 import com.velocitypowered.api.util.Favicon;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
@@ -204,8 +205,10 @@ public final class TemplateFactory {
     }
 
     /** 真实在线玩家：原始 ID 文本与真实 UUID（低频刷新路径，取当前快照）。 */
+    /** 真实在线玩家：原始 ID 文本与真实 UUID，按 UUID 排序保证展示顺序稳定（低频刷新路径）。 */
     private List<SampleEntry> realSampleRows() {
         List<Player> online = new ArrayList<>(this.proxy.getAllPlayers());
+        online.sort(Comparator.comparing(Player::getUniqueId));
         if (online.size() > ResponseTemplate.MAX_SAMPLE_ROWS) {
             online = online.subList(0, ResponseTemplate.MAX_SAMPLE_ROWS);
         }
@@ -216,6 +219,23 @@ public final class TemplateFactory {
                     player.getUsername()));
         }
         return entries;
+    }
+
+    /**
+     * 动态重建指纹：真实玩家名单（已排序）与静态列表的组合哈希；非 real 模式恒 0。
+     * 与人数共同决定是否跳过整体重建。
+     */
+    long sampleFingerprint(DynamicSource source) {
+        if (!source.realPlayers()) {
+            return 0L;
+        }
+        List<SampleEntry> rows = realSampleRows();
+        long hash = rows.size();
+        for (SampleEntry row : rows) {
+            hash = hash * 31L + row.id().hashCode();
+            hash = hash * 31L + row.name().hashCode();
+        }
+        return hash;
     }
 
     private List<SampleEntry> escapeRows(List<String> rows, int online, int max) {
