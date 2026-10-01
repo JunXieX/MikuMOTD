@@ -221,8 +221,16 @@ stop_proxy() {
 measure() {
   local name=$1 round=$2
   local lat qps fail
-  lat=$("$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --latency "$LATENCY_RUNS" | awk '{print $2}')
-  read -r _ qps _ fail <<< "$("$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --bench "$BENCH_SECONDS" --threads "$BENCH_THREADS")"
+  if ! lat=$("$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --latency "$LATENCY_RUNS" | awk '{print $2}'); then
+    echo "  延迟测量失败: $name（服务端日志尾部如下）" >&2
+    tail -30 "$WORK/$name-server.log" >&2 || true
+    return 1
+  fi
+  if ! read -r _ qps _ fail <<< "$("$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" --bench "$BENCH_SECONDS" --threads "$BENCH_THREADS")"; then
+    echo "  QPS 测量失败: $name（服务端日志尾部如下）" >&2
+    tail -30 "$WORK/$name-server.log" >&2 || true
+    return 1
+  fi
   echo "$name $round $lat $qps $fail" >> "$RESULTS"
   echo "  第 $round 轮：延迟 ${lat}µs，QPS $qps（失败 $fail）"
 }
@@ -254,7 +262,11 @@ for round in $(seq 1 "$ROUNDS"); do
       continue
     fi
     echo "[$scenario 第 $round 轮]"
-    measure "$scenario" "$round"
+    if ! measure "$scenario" "$round"; then
+      SCENARIO_FAILED[$scenario]="测量失败"
+      stop_proxy "$scenario"
+      continue
+    fi
     stop_proxy "$scenario"
   done
 done
