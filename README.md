@@ -82,17 +82,17 @@ maintenance {
 
 ## 性能
 
-在 GitHub Actions 的同一台 runner 上五场景交替轮测（3 轮取中位数），对比对象含现场从源码构建的 FastMOTD 与 MiniMOTD，MOTD 内容对齐为单行描述：
+在 GitHub Actions 的同一台 runner 上五场景交替轮测（3 轮取中位数），对比对象含现场从源码构建的 FastMOTD 与 MiniMOTD（两者使用各自默认配置，MikuMOTD 场景使用对齐精简配置）：
 
 | 场景 | 平均延迟（µs/完整 ping） | QPS（8 线程 × 6s） |
 |---|---|---|
-| **MikuMOTD 快速路径** | **480** | **10 564** |
-| FastMOTD | 507 | 10 259 |
-| 裸代理（无插件） | 611 | 8 605 |
-| MikuMOTD 事件模式 | 618 | 8 082 |
-| MiniMOTD | 765 | 6 680 |
+| **MikuMOTD 快速路径** | **313** | **26 214** |
+| FastMOTD | 359 | 26 140 |
+| 裸代理（无插件） | 503 | 21 879 |
+| MikuMOTD 事件模式 | 492 | 20 523 |
+| MiniMOTD | 622 | 14 178 |
 
-快速路径延迟低于 FastMOTD 约 5%、低于不装任何插件的原生代理约 27%、低于 MiniMOTD 约 59%；事件模式兜底与裸代理持平。共享 runner 上负载有漂移，表内数据仅供同批次横向对比，完整方法与原始数据见仓库 Actions 的 **Bench** 工作流（可随时手动触发复测）。
+快速路径延迟低于 FastMOTD 约 13%、低于不装任何插件的原生代理约 38%、低于 MiniMOTD 约 50%；QPS 与 FastMOTD 相当、高于裸代理约 20%、高于 MiniMOTD 约 85%；事件模式兜底与裸代理相当。共享 runner 上负载有漂移，表内数据仅供同批次横向对比，完整方法与原始数据见仓库 Actions 的 **Bench** 工作流（可随时手动触发复测）。
 
 ## 注意事项
 
