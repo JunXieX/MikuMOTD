@@ -18,5 +18,5 @@ public record ProfileData(
 ) {
 
     public static final ProfileData EMPTY =
-            new ProfileData("", List.of(), List.of(), List.of(), false);
+            new ProfileData("", List.of(), List.of(), List.of(), true);
 }

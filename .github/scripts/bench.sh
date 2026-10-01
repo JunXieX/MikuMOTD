@@ -109,6 +109,7 @@ motd {
     descriptions=["&aBenchmark MOTD line one"]
     favicons=[]
     player-list=[]
+    player-list-source="static"
 }
 CONF
       ;;

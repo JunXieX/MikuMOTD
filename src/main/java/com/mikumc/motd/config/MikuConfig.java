@@ -36,7 +36,7 @@ public final class MikuConfig {
             List.of("<bold><gradient:#40c4ff:#a78bfa>MikuMOTD</gradient></bold> <gray>»</gray> <yellow>极速 MOTD"),
             List.of("server-icon.png"),
             List.of("<gray>由</gray> <aqua>MikuMC</aqua> <gray>驱动</gray>", "<yellow>交流群 <white>1105054380"),
-            false
+            true
     );
     private Map<String, ProfileData> protocolProfiles = Map.of();
     private Map<String, ProfileData> domainProfiles = Map.of();
@@ -53,7 +53,7 @@ public final class MikuConfig {
             List.of("<bold><red>服务器维护中</red></bold>{NL}<gray>请稍后再连接</gray>"),
             List.of("server-icon.png"),
             List.of("<red>维护模式已开启</red>"),
-            false
+            true
     );
     private Map<String, ProfileData> maintenanceProtocolProfiles = Map.of();
     private Map<String, ProfileData> maintenanceDomainProfiles = Map.of();
@@ -229,8 +229,9 @@ public final class MikuConfig {
         List<String> descriptions = readStringList(node.node("descriptions"), fallback.descriptions());
         List<String> favicons = readStringList(node.node("favicons"), fallback.favicons());
         List<String> playerList = readStringList(node.node("player-list"), fallback.playerList());
-        boolean realPlayers = "real".equalsIgnoreCase(
-                node.node("player-list-source").getString("static"));
+        // 默认显示真实在线玩家；显式写 static 才使用静态行
+        boolean realPlayers = !"static".equalsIgnoreCase(
+                node.node("player-list-source").getString("real"));
         return new ProfileData(versionName, descriptions, favicons, playerList, realPlayers);
     }
 
@@ -361,9 +362,9 @@ public final class MikuConfig {
         node.node("descriptions").setList(String.class, profile.descriptions());
         node.node("favicons").setList(String.class, profile.favicons());
         node.node("player-list").setList(String.class, profile.playerList()).comment(
-                "玩家列表静态行；player-list-source=real 时此列表不生效");
+                "玩家列表静态行；player-list-source=real（默认）时此列表不生效，切回 static 后显示");
         node.node("player-list-source").set(profile.realPlayers() ? "real" : "static").comment(
-                "static：显示 player-list 的静态行；real：显示真实在线玩家的 ID 与名字");
+                "real（默认）：显示真实在线玩家的 ID 与名字；static：显示 player-list 的静态行");
     }
 
     private void writeProfileMap(CommentedConfigurationNode node, Map<String, ProfileData> profiles, String comment) throws IOException {
