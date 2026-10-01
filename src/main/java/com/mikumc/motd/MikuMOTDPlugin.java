@@ -129,7 +129,7 @@ public final class MikuMOTDPlugin {
             config.load(configFile);
 
             TemplateFactory factory = new TemplateFactory(
-                    this.dataDirectory, config.textFormat(), config.pngQuality(), this.logger);
+                    this.dataDirectory, config.textFormat(), config.pngQuality(), this.logger, this.proxy);
             PingRegistry fresh = PingRegistry.build(config, factory, this.logger);
             // 维护状态跟随配置初始化；游戏内切换只改运行时标志，重启后回到配置值
             boolean maintenance = config.maintenanceEnabled();

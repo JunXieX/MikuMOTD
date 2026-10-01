@@ -18,7 +18,7 @@ MikuMC 系列插件交流群：1105054380
 - **按域名的 MOTD**：同一代理不同域名（`play.example.com:25565`）显示不同 MOTD，匹配不区分大小写
 - **假在线人数**：固定加值 + 百分比加值
 - **最大人数**：固定值或「当前人数 + N」两种模式
-- **玩家列表（sample）**：自定义图标下的玩家展示行
+- **玩家列表（sample）**：自定义静态展示行，或设置为显示真实在线玩家的 ID 与名字
 - **维护模式**：独立 MOTD、可覆盖显示人数、可选登录直接拒绝（带 IP 白名单）、可选隐藏真实协议号
 - **占位符**：描述与玩家列表支持 `{online}`、`{max}` 与换行符 `{NL}`，人数变化时自动重渲染
 - **多文本格式**：MINIMESSAGE / LEGACY_AMPERSAND / LEGACY_SECTION / JSON
@@ -64,6 +64,7 @@ motd {
     descriptions=["<bold><gradient:#40c4ff:#a78bfa>MikuMOTD</gradient></bold>"]
     favicons=["server-icon.png"]   # 支持文件路径或 data:image/png;base64,... 
     player-list=["<gray>由</gray> <aqua>MikuMC</aqua> <gray>驱动</gray>"]
+    # player-list-source="real"    # real：列表显示真实在线玩家的 ID 与名字（static 为静态行）
 }
 # 可选节，节点结构与 motd 相同：
 # protocol-motd { "757-800" { ... } }

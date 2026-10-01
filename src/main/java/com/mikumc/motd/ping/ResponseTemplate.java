@@ -33,12 +33,13 @@ public final class ResponseTemplate {
     /** 客户端列表最多展示的玩家行数。 */
     public static final int MAX_SAMPLE_ROWS = 10;
 
-    /** 动态模板（文本含 {online}/{max} 占位符）的整体重建输入。 */
+    /** 动态模板（文本含 {online}/{max} 占位符或玩家列表跟随真实玩家）的整体重建输入。 */
     public record DynamicSource(
             String versionName,
             String descriptionWithPlaceholders,
             List<String> playerList,
             String faviconUrl,
+            boolean realPlayers,
             TemplateFactory factory
     ) {
     }

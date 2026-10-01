@@ -83,7 +83,8 @@ public final class PingRegistry {
                 + String.join("\u0001", data.descriptions()) + '\u0000'
                 + String.join("\u0001", data.favicons()) + '\u0000'
                 + String.join("\u0001", data.playerList()) + '\u0000'
-                + fixedProtocol;
+                + fixedProtocol + '\u0000'
+                + data.realPlayers();
         return cache.computeIfAbsent(key, ignored -> {
             PingProfile profile = new PingProfile(factory.compile(data, fixedProtocol));
             all.add(profile);
