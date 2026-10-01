@@ -89,19 +89,25 @@ public final class TemplateFactory {
                 ? realSampleRows()
                 : staticSampleRows(profile.playerList());
         String escapedVersion = ResponseTemplate.escapeJson(clean(profile.versionName()));
+        int placeholderProtocol = fixedProtocol ? 1 : 0;
 
         Offsets offsets = ResponseTemplate.newOffsets();
-        String json = renderJson(escapedVersion, descriptionJson, faviconUrl, rows, 0, 1, 0, offsets);
+        String json = renderJson(escapedVersion, descriptionJson, faviconUrl, rows,
+                0, 1, placeholderProtocol, offsets);
 
         ServerPing compat = buildCompat(descriptionJson, rows, faviconUrl,
-                clean(profile.versionName()), 0, 1, 0);
+                clean(profile.versionName()), 0, 1, placeholderProtocol);
         DynamicSource source = new DynamicSource(profile.versionName(), description,
                 profile.playerList(), faviconUrl, profile.realPlayers(), this);
-        return ResponseTemplate.compile(json, offsets, false, compat, source);
+        return ResponseTemplate.compile(json, offsets, fixedProtocol, compat, source);
     }
 
-    /** 动态模板重建入口（由 {@link ResponseTemplate#update} 触发，低频）。 */
-    String renderDynamic(DynamicSource source, int online, int max, int placeholderProtocol, Offsets offsets) {
+    /**
+     * 动态模板重建（由 {@link ResponseTemplate#update} 触发，低频）：
+     * 真实玩家名单在此处取一次快照，字节帧与事件模式兜底共用，保证两者一致。
+     */
+    DynamicOutput renderDynamicFull(DynamicSource source, int online, int max,
+                                    int placeholderProtocol, Offsets offsets) {
         String descriptionJson = GSON.serialize(
                 this.format.deserialize(clean(source.descriptionWithPlaceholders())
                         .replace("{online}", String.valueOf(online))
@@ -110,21 +116,15 @@ public final class TemplateFactory {
                 ? realSampleRows()
                 : escapeRows(source.playerList(), online, max);
         String escapedVersion = ResponseTemplate.escapeJson(clean(source.versionName()));
-        return renderJson(escapedVersion, descriptionJson, source.faviconUrl(), rows,
+        String json = renderJson(escapedVersion, descriptionJson, source.faviconUrl(), rows,
                 online, max, placeholderProtocol, offsets);
+        ServerPing compat = buildCompat(descriptionJson, rows, source.faviconUrl(),
+                clean(source.versionName()), online, max, placeholderProtocol);
+        return new DynamicOutput(json, compat);
     }
 
-    /** 动态模板重建时同步重建事件模式兜底用的 ServerPing（低频）。 */
-    ServerPing rebuildCompat(DynamicSource source, int online, int max) {
-        String descriptionJson = GSON.serialize(
-                this.format.deserialize(clean(source.descriptionWithPlaceholders())
-                        .replace("{online}", String.valueOf(online))
-                        .replace("{max}", String.valueOf(max))));
-        List<SampleEntry> rows = source.realPlayers()
-                ? realSampleRows()
-                : escapeRows(source.playerList(), online, max);
-        return buildCompat(descriptionJson, rows, source.faviconUrl(),
-                clean(source.versionName()), online, max, 0);
+    /** 一次动态重建的产物：完整 JSON 字符串与事件模式兜底对象。 */
+    record DynamicOutput(String json, ServerPing compat) {
     }
 
     private String renderJson(String escapedVersion, String descriptionJson, String faviconUrl,

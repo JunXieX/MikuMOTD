@@ -161,17 +161,17 @@ public final class ResponseTemplate {
 
     private void rebuild(int online, int max) {
         Offsets offsets = newOffsets();
-        String json = this.dynamicSource.factory().renderDynamic(
+        // 玩家名单、字节帧与事件模式兜底在同一次重建内取值，保持一致
+        TemplateFactory.DynamicOutput output = this.dynamicSource.factory().renderDynamicFull(
                 this.dynamicSource, online, max, this.placeholderProtocol(), offsets);
-        ByteBuf frame = toFrame(json, offsets);
+        ByteBuf frame = toFrame(output.json(), offsets);
 
         ByteBuf oldFrame = this.fullFrame;
         this.fullFrame = frame;
         this.protocolOffset = offsets.protocol + offsets.jsonOffset;
         this.onlineOffset = offsets.online + offsets.jsonOffset;
         this.maxOffset = offsets.max + offsets.jsonOffset;
-        // 事件模式兜底同步重渲染：描述内嵌的占位符文本需要跟随最新人数
-        this.compatPing = this.dynamicSource.factory().rebuildCompat(this.dynamicSource, online, max);
+        this.compatPing = output.compat();
         // 协议视图基于旧内存，全部作废，下次 ping 按需重建
         this.protocolViews.values().forEach(ByteBuf::release);
         this.protocolViews.clear();

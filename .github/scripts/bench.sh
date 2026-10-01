@@ -84,7 +84,7 @@ fi
 make_plugins() {
   local target=$1 mode=$2
   rm -rf "$target"
-  mkdir -p "$target/mikumotd"
+  mkdir -p "$target/mikumotd" "$target/fastmotd" "$target/minimotd"
   case $mode in
     bare)
       ;;
@@ -162,7 +162,7 @@ loaded_marker() {
 start_proxy() {
   local name=$1 mode=$2
   local run_dir=$WORK/run-$name
-  make_plugins "$WORK/plugins-$name" "$mode"
+  make_plugins "$WORK/plugins-$name" "$mode" || return 1
   mkdir -p "$run_dir/plugins"
   if [ "$mode" != "bare" ]; then
     cp -r "$WORK/plugins-$name/." "$run_dir/plugins/"
