@@ -166,7 +166,7 @@ start_proxy() {
         fi
       fi
       # 探活：部分插件的响应缓存要等首次定时刷新才就绪，等到一次完整 ping 成功再进入测量
-      for _ in $(seq 1 15); do
+      for _ in $(seq 1 30); do
         if "$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" >/dev/null 2>&1; then
           break
         fi
