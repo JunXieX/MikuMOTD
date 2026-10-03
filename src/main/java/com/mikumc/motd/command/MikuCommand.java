@@ -9,11 +9,11 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
 /**
- * /mikumotd 命令：reload（重载配置）、maintenance（切换维护模式）、info（查看状态）。
+ * /mikumotd 命令：reload（重载配置）、info（查看状态）。
  */
 public final class MikuCommand implements SimpleCommand {
 
-    private static final List<String> SUGGESTIONS = List.of("info", "maintenance", "reload");
+    private static final List<String> SUGGESTIONS = List.of("info", "reload");
 
     private final MikuMOTDPlugin plugin;
 
@@ -46,32 +46,6 @@ public final class MikuCommand implements SimpleCommand {
                     source.sendMessage(Component.text("MikuMOTD 配置重载失败，详见控制台", NamedTextColor.RED));
                 }
             }
-            case "maintenance" -> {
-                if (!source.hasPermission("mikumotd.command.maintenance")) {
-                    this.deny(source);
-                    return;
-                }
-                boolean target;
-                if (args.length >= 2) {
-                    String value = args[1].toLowerCase(Locale.ROOT);
-                    if (value.equals("on") || value.equals("true")) {
-                        target = true;
-                    } else if (value.equals("off") || value.equals("false")) {
-                        target = false;
-                    } else if (value.equals("toggle") || value.equals("t")) {
-                        target = !this.plugin.isMaintenance();
-                    } else {
-                        source.sendMessage(Component.text("用法：/mikumotd maintenance <on|off|toggle>",
-                                NamedTextColor.YELLOW));
-                        return;
-                    }
-                } else {
-                    target = !this.plugin.isMaintenance();
-                }
-                this.plugin.setMaintenance(target);
-                source.sendMessage(Component.text(
-                        target ? "维护模式已开启" : "维护模式已关闭", NamedTextColor.GREEN));
-            }
             case "info" -> {
                 if (!source.hasPermission("mikumotd.command.info")) {
                     this.deny(source);
@@ -80,7 +54,7 @@ public final class MikuCommand implements SimpleCommand {
                 source.sendMessage(this.plugin.statusInfo());
             }
             default -> source.sendMessage(Component.text(
-                    "用法：/mikumotd <info|maintenance|reload>", NamedTextColor.YELLOW));
+                    "用法：/mikumotd <info|reload>", NamedTextColor.YELLOW));
         }
     }
 
@@ -101,8 +75,7 @@ public final class MikuCommand implements SimpleCommand {
     @Override
     public boolean hasPermission(Invocation invocation) {
         return invocation.source().hasPermission("mikumotd.command.info")
-                || invocation.source().hasPermission("mikumotd.command.reload")
-                || invocation.source().hasPermission("mikumotd.command.maintenance");
+                || invocation.source().hasPermission("mikumotd.command.reload");
     }
 
     private void deny(CommandSource source) {

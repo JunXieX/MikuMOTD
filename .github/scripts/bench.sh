@@ -94,26 +94,12 @@ make_plugins() {
     compat | fast)
       cp "$PLUGIN_JAR" "$target/"
       cat > "$target/mikumotd/config.conf" <<CONF
-general {
-    update-interval-ms=3000
-    direct-write=true
-    compat-mode=$([ "$mode" = "compat" ] && echo true || echo false)
-    text-format=LEGACY_AMPERSAND
-    png-quality=-1
-}
-players {
-    max-count-type=FIXED
-    max-count=1000
-    fake-online-fixed=0
-    fake-online-percent=0
-}
-motd {
-    version-name="Benchmark"
-    descriptions=["&aBenchmark MOTD line one"]
-    favicons=[]
-    player-list=[]
-    player-list-source="static"
-}
+logo="none"
+motd="&aBenchmark MOTD line one"
+max-players=1000
+update-interval-ms=3000
+direct-write=true
+compat-mode=$([ "$mode" = "compat" ] && echo true || echo false)
 CONF
       ;;
     fastmotd)

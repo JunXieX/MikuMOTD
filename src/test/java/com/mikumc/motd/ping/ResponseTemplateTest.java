@@ -4,10 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.mikumc.motd.ping.ResponseTemplate.SampleEntry;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -23,7 +25,6 @@ class ResponseTemplateTest {
 
     @Test
     void byteOffsetCountsLatinSupplementAsTwo() {
-        // » 为 U+00BB，UTF-8 两字节
         assertEquals(2, ResponseTemplate.byteOffsetOf("»", 1));
     }
 
@@ -34,9 +35,7 @@ class ResponseTemplateTest {
 
     @Test
     void byteOffsetCountsSurrogatePairAsFour() {
-        String text = "a😀b";
-        // a(1) + 代理对(4)
-        assertEquals(5, ResponseTemplate.byteOffsetOf(text, 3));
+        assertEquals(5, ResponseTemplate.byteOffsetOf("a😀b", 3));
     }
 
     @Test
@@ -73,65 +72,65 @@ class ResponseTemplateTest {
 
     @Test
     void escapeJsonHandlesQuotesControlCharsAndUtf8Passthrough() {
-        assertEquals("\\\"a\\\\b\\n\\t\\u0001测", ResponseTemplate.escapeJson("\"a\\b\n\t\u0001测"));
+        assertEquals("\\\"", ResponseTemplate.escapeJson("\""));
+        assertEquals("\\\\", ResponseTemplate.escapeJson("\\"));
+        assertEquals("\\b", ResponseTemplate.escapeJson("\b"));
+        assertEquals("\\n", ResponseTemplate.escapeJson("\n"));
+        assertEquals("\\t", ResponseTemplate.escapeJson("\t"));
+        assertEquals("\\u0001", ResponseTemplate.escapeJson("\u0001"));
+        assertEquals("测", ResponseTemplate.escapeJson("测"));
     }
 
     @Test
-    void compiledTemplateKeepsOffsetsAcrossNonAsciiContent() throws Exception {
-        // 描述含 CJK 与表情符号、玩家列表含 CJK：数字槽偏移必须落到正确字节位置
-        com.mikumc.motd.config.TextFormat format = com.mikumc.motd.config.TextFormat.LEGACY_AMPERSAND;
-        TemplateFactory factory = new TemplateFactory(
-                java.nio.file.Path.of("."), format, -1.0D,
-                org.slf4j.LoggerFactory.getLogger("test"), null);
-        com.mikumc.motd.config.ProfileData profile = new com.mikumc.motd.config.ProfileData(
-                "版本名😀", List.of("&a中文描述😀"), List.of(), List.of("&b玩家甲"), false);
-
-        ResponseTemplate template = factory.compile(profile, false)[0];
-
-        ByteBuf frame = template.acquire(773);
-        assertNotNull(frame);
+    void compiledTemplateKeepsOffsetsAcrossNonAsciiContent() {
+        // 描述与玩家名含 CJK 与表情符号：数字槽偏移必须落到正确字节位置
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"color\":\"green\",\"text\":\"中文描述😀\"}",
+                "版本名😀",
+                null,
+                0,
+                0, 1,
+                List.of(new SampleEntry(UUID.randomUUID(), "玩家甲")));
         try {
-            String json = readFrameJson(frame);
-            assertTrue(json.contains("\"online\":       0,"), "初始在线人数应在正确偏移：" + json);
-            assertTrue(json.contains("\"max\":       1,"), "初始最大人数应在正确偏移：" + json);
-            assertTrue(json.contains("\"protocol\":      773"), "协议号应在正确偏移：" + json);
+            String json = readFrameJson(template.acquire(773));
+            assertTrue(json.contains("\"online\":       0,"), "初始在线人数：" + json);
+            assertTrue(json.contains("\"max\":       1,"), "初始最大人数：" + json);
+            assertTrue(json.contains("\"protocol\":      773"), "协议号锚定：" + json);
             assertTrue(json.contains("中文描述"), "描述应完整保留：" + json);
+            assertTrue(json.contains("玩家甲"), "玩家列表应完整保留：" + json);
         } finally {
-            frame.release();
+            template.dispose();
         }
+    }
 
-        // 人数变化后再次获取：原位覆写必须同样命中正确偏移（含多字节内容场景）
-        template.update(12345, 6789);
-        ByteBuf updated = template.acquire(773);
+    @Test
+    void updateRewritesCountsAndSampleAtCorrectOffsets() {
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"描述\"}", "MikuMOTD", null, 0, 0, 1, List.of());
         try {
-            String json = readFrameJson(updated);
+            template.update(12345, 6789, List.of(
+                    new SampleEntry(UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5"), "Notch")));
+            String json = readFrameJson(template.acquire(773));
             assertTrue(json.contains("\"online\":   12345,"), "覆写后的在线人数：" + json);
             assertTrue(json.contains("\"max\":    6789,"), "覆写后的最大人数：" + json);
-            assertTrue(json.contains("\"protocol\":      773"), "覆写后协议号不变：" + json);
+            assertTrue(json.contains("Notch"), "覆写后的玩家列表：" + json);
+            assertTrue(json.contains("\"protocol\":      773"), "协议号锚定：" + json);
         } finally {
-            updated.release();
+            template.dispose();
         }
-        template.dispose();
     }
 
     @Test
-    void fixedProtocolTemplateIgnoresClientProtocol() throws Exception {
-        TemplateFactory factory = new TemplateFactory(
-                java.nio.file.Path.of("."), com.mikumc.motd.config.TextFormat.LEGACY_AMPERSAND, -1.0D,
-                org.slf4j.LoggerFactory.getLogger("test"), null);
-        com.mikumc.motd.config.ProfileData profile = new com.mikumc.motd.config.ProfileData(
-                "维护中", List.of("&c维护"), List.of(), List.of(), false);
-
-        ResponseTemplate template = factory.compile(profile, true)[0];
-        ByteBuf frame = template.acquire(758);
+    void protocolAnchorRewritesOnProtocolChange() {
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"d\"}", "v", null, 0, 0, 1, List.of());
         try {
-            String json = readFrameJson(frame);
-            assertTrue(json.contains("\"protocol\":        1"), "固定协议模板应恒为 1：" + json);
+            readFrameJson(template.acquire(773));
+            String next = readFrameJson(template.acquire(758));
+            assertTrue(next.contains("\"protocol\":      758"), "异协议 ping 应重锚协议号：" + next);
         } finally {
-            frame.release();
+            template.dispose();
         }
-        assertEquals(1, template.acquireCompat(758).getVersion().getProtocol());
-        template.dispose();
     }
 
     /** 读出一个完整响应帧内的 JSON 文本（帧自带长度前缀）。 */

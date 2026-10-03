@@ -8,76 +8,47 @@ MikuMC 系列插件交流群：1105054380
 
 ---
 
-面向 Velocity 代理的高性能 MOTD 插件。状态查询（服务器列表 ping）在 Netty 字节层直接完成：响应帧预渲染为字节、零拷贝分发，整个 ping 不进入代理的会话处理，不做任何逐次解码、序列化与字符串操作。
+面向 Velocity 代理的高性能 MOTD 插件。状态查询（服务器列表 ping）在 Netty 字节层直接完成：响应帧预渲染、零拷贝分发，整个 ping 不进入代理的会话处理，不做任何逐次解码、序列化与字符串操作。
 
 ## 功能
 
-- **字节级快速路径**：响应包在配置加载时一次性预渲染，ping 路径上仅做一次零拷贝切片后直接写出，负载低于不装任何插件的原生代理
-- **多 MOTD 随机轮换**：描述与图标做笛卡尔积生成模板池，每次 ping 随机取一条
-- **按协议版本段的 MOTD**：为不同客户端版本段（如 `757-800`）配置独立 MOTD
-- **按域名的 MOTD**：同一代理不同域名（`play.example.com:25565`）显示不同 MOTD，匹配不区分大小写
-- **假在线人数**：固定加值 + 百分比加值
-- **最大人数**：固定值或「当前人数 + N」两种模式
-- **玩家列表（sample）**：默认显示真实在线玩家的 ID 与名字，也可切换为自定义静态展示行
-- **维护模式**：独立 MOTD、可覆盖显示人数、可选登录直接拒绝（带 IP 白名单）、可选隐藏真实协议号
-- **占位符**：描述与玩家列表支持 `{online}`、`{max}` 与换行符 `{NL}`，人数变化时自动重渲染
-- **多文本格式**：MINIMESSAGE / LEGACY_AMPERSAND / LEGACY_SECTION / JSON
-- **图标规范化**：任意尺寸 PNG 自动缩放到 64x64，可选重编码压缩
-- **热重载**：`/mikumotd reload` 即时生效，重载失败时保留旧配置继续运行
+- **自定义服务器图标（logo）**：PNG 文件路径或 base64 data URL，任意尺寸自动缩放为 64x64
+- **MOTD 文本**：支持 MiniMessage 全语法（渐变、粗体等），`{NL}` 换行
+- **人数上限**：可覆盖显示值，缺省沿用 velocity.toml 的 show-max-players
+- **真实玩家列表**：与原生代理一致的悬停玩家展示（按 UUID 排序，最多 12 行，随刷新周期自动更新）
+- **热重载**：/mikumotd reload 即时生效，重载失败时保留旧配置继续运行
+
+真实玩家列表与在线人数恒为代理真实数据，不做任何伪造。
 
 ## 安装
 
 1. 服务器要求：Velocity 4.x（按 4.2.0 构建），Java 25 及以上
-2. 将 `MikuMOTD-x.y.z.jar` 放入 `plugins/` 目录，启动代理
-3. 首次启动生成 `plugins/mikumotd/config.conf`，按需修改后 `/mikumotd reload`
+2. 将 MikuMOTD-x.y.z.jar 放入 plugins/ 目录，启动代理
+3. 首次启动生成 plugins/mikumotd/config.conf，按需修改后 /mikumotd reload
 
 ## 命令与权限
 
 | 命令 | 说明 | 权限节点 |
 |---|---|---|
-| `/mikumotd info` | 查看运行模式、维护状态与在线人数 | `mikumotd.command.info` |
-| `/mikumotd reload` | 重载配置 | `mikumotd.command.reload` |
-| `/mikumotd maintenance [on\|off\|toggle]` | 切换维护模式（运行时生效，不写回配置文件） | `mikumotd.command.maintenance` |
+| /mikumotd info | 查看运行模式、人数上限与在线人数 | mikumotd.command.info |
+| /mikumotd reload | 重载配置 | mikumotd.command.reload |
 
-## 配置概览
+## 配置
 
 ```hocon
-general {
-    # 人数刷新间隔（毫秒）
-    update-interval-ms=3000
-    # true：直写连接出站缓冲（最快）；false：走 Netty 标准 write 路径
-    direct-write=true
-    # 强制事件模式（快速路径不可用时插件也会自动回退，仅性能不同）
-    compat-mode=false
-    text-format=MINIMESSAGE
-    # 图标重编码质量 0.0~1.0，越小文件越小；-1 关闭
-    png-quality=0.0
-}
-players {
-    max-count-type=FIXED    # FIXED：固定最大人数；ADD：当前人数 + max-count
-    max-count=1000
-    fake-online-fixed=0
-    fake-online-percent=0
-}
-motd {
-    version-name="MikuMOTD"
-    descriptions=["<bold><gradient:#40c4ff:#a78bfa>MikuMOTD</gradient></bold>"]
-    favicons=["server-icon.png"]   # 支持文件路径或 data:image/png;base64,... 
-    player-list=["<gray>由</gray> <aqua>MikuMC</aqua> <gray>驱动</gray>"]
-    player-list-source="real"      # real（默认）：显示真实在线玩家的 ID 与名字；static：显示 player-list 静态行
-}
-# 可选节，节点结构与 motd 相同：
-# protocol-motd { "757-800" { ... } }
-# domain-motd  { "play.example.com:25565" { ... } }
-maintenance {
-    enabled=false
-    kick-on-join=false
-    kick-whitelist=["127.0.0.1"]
-    kick-message="<red>服务器维护中，请稍后再来</red>"
-    override-online=-1
-    override-max-online=-1
-    motd { ... }
-}
+# 服务器图标：PNG 文件路径（相对插件目录或绝对路径）、base64 data URL 或 "none"
+logo="server-icon.png"
+# MOTD 文本（MiniMessage），{NL} 为换行
+motd="<bold><gradient:#40c4ff:#a78bfa>MikuMOTD</gradient></bold>{NL}<gray>由</gray> <aqua>MikuMC</aqua> <gray>驱动</gray>"
+# 显示的人数上限；0 = 使用 velocity.toml 的 show-max-players
+max-players=0
+# 在线人数与真实玩家列表的刷新间隔（毫秒）
+update-interval-ms=1000
+# true：直写连接出站缓冲（最快）；false：走 Netty 标准 write 路径
+direct-write=true
+# 强制使用事件模式（快速路径注入失败时插件会自动回退，仅性能不同）
+compat-mode=false
+# log-pings / log-improper-pings / allow-improper-pings：诊断与安全选项，默认关闭
 ```
 
 ## 性能
@@ -96,7 +67,6 @@ maintenance {
 
 ## 注意事项
 
-- 快速路径直接拦截状态查询连接，`velocity.toml` 的 `ping-passthrough` 对这些连接不再生效（自定义 MOTD 本就是替代行为）；登录与传输连接完全透传，代理原生行为不受影响
-- 状态查询连接不触发 `ConnectionHandshakeEvent` 等代理握手事件（登录连接不受影响）；依赖该事件做防机器人等用途的插件不受此插件干扰
+- 快速路径直接拦截状态查询连接，velocity.toml 的 ping-passthrough 对这些连接不再生效（自定义 MOTD 本就是替代行为）；登录与传输连接完全透传，代理原生行为不受影响
+- 状态查询连接不触发 ConnectionHandshakeEvent 等代理握手事件（登录连接不受影响）；依赖该事件做防机器人等用途的插件不受此插件干扰
 - 注入依赖 Velocity 内部实现，若未来代理版本变更导致注入失败，插件会自动回退到事件模式并输出日志，功能完整可用
-- 游戏内切换的维护模式不写回配置文件，重启后回到配置文件的 `maintenance.enabled` 值

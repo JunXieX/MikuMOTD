@@ -1,17 +1,15 @@
 package com.mikumc.motd.compat;
 
 import com.mikumc.motd.MikuMOTDPlugin;
-import com.mikumc.motd.ping.PingRegistry;
+import com.mikumc.motd.ping.ResponseTemplate;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyPingEvent;
-import com.velocitypowered.api.proxy.InboundConnection;
-import java.util.Locale;
+import com.velocitypowered.api.proxy.server.ServerPing;
 
 /**
  * 事件模式兜底：快速路径注入失败或被配置禁用时，通过 {@link ProxyPingEvent}
- * 返回预构建的 {@link com.velocitypowered.api.proxy.server.ServerPing}。
- * 该模式同样不做逐次渲染，仅多一次事件分发，功能与快速路径一致。
- * 每次事件从主插件取当前注册表，重载后自动切换到新模板。
+ * 返回预构建的 {@link ServerPing}（按客户端协议号替换版本信息）。
+ * 每次事件从主插件取当前模板，重载后自动切换。
  */
 public final class CompatListener {
 
@@ -23,22 +21,19 @@ public final class CompatListener {
 
     @Subscribe(priority = 200)
     public void onPing(ProxyPingEvent event) {
-        PingRegistry registry = this.plugin.registryForCompat();
-        if (registry == null) {
+        ResponseTemplate template = this.plugin.templateForCompat();
+        if (template == null) {
             return;
         }
 
-        InboundConnection connection = event.getConnection();
-        int protocol = connection.getProtocolVersion().getProtocol();
-        // getHostString 不触发 DNS 反查，事件模式热路径必须避免阻塞
-        String hostKey = connection.getVirtualHost()
-                .map(address -> (address.getHostString() + ":" + address.getPort())
-                        .toLowerCase(Locale.ROOT))
-                .orElse(null);
-
-        PingRegistry.ServerPingSelection selection = registry.selectCompat(protocol, hostKey);
-        if (selection != null && selection.ping() != null) {
-            event.setPing(selection.ping());
+        ServerPing base = template.acquireCompat();
+        if (base == null) {
+            return;
         }
+
+        int protocol = event.getConnection().getProtocolVersion().getProtocol();
+        ServerPing.Version version = base.getVersion();
+        event.setPing(version.getProtocol() == protocol ? base
+                : base.asBuilder().version(new ServerPing.Version(protocol, version.getName())).build());
     }
 }

@@ -1,7 +1,6 @@
 package com.mikumc.motd.inject;
 
 import com.mikumc.motd.MikuMOTDPlugin;
-import com.mikumc.motd.ping.ResponseTemplate;
 import com.velocitypowered.proxy.protocol.StateRegistry;
 import com.velocitypowered.proxy.protocol.netty.MinecraftDecoder;
 import com.velocitypowered.proxy.protocol.netty.MinecraftVarintFrameDecoder;
@@ -41,7 +40,6 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
     private final MikuMOTDPlugin plugin;
     private Phase phase = Phase.HANDSHAKE;
     private int protocol;
-    private String hostKey;
 
     public StatusFastPath(MikuMOTDPlugin plugin) {
         this.plugin = plugin;
@@ -80,16 +78,15 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             throw new IndexOutOfBoundsException("握手包号异常 0x" + Integer.toHexString(packetId));
         }
         int protocol = readVarInt(buf);
-        String host = readString(buf);
+        readString(buf);
         if (buf.readableBytes() < 3) {
             throw new IndexOutOfBoundsException("handshake too short");
         }
-        int port = buf.readUnsignedShort();
+        buf.readUnsignedShort();
         int next = readVarInt(buf);
 
         if (next == NEXT_STATUS_STATE) {
             this.protocol = protocol;
-            this.hostKey = cleanHost(host).toLowerCase(java.util.Locale.ROOT) + ":" + port;
             switchDecoders(ctx);
             this.phase = Phase.REQUEST;
             buf.release();
@@ -141,14 +138,9 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
     }
 
     private void respondStatus(ChannelHandlerContext ctx) {
-        ResponseTemplate template = this.plugin.selectResponse(this.protocol, this.hostKey);
-        if (template == null) {
-            // 配置重载的瞬间窗口，直接结束连接即可
-            ctx.channel().close();
-            return;
-        }
-        ByteBuf response = template.acquire(this.protocol);
+        ByteBuf response = this.plugin.selectResponse(this.protocol);
         if (response == null) {
+            // 插件未就绪或配置重载的瞬间窗口，直接结束连接即可
             ctx.channel().close();
             return;
         }
@@ -212,17 +204,5 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         byte[] bytes = new byte[length];
         buf.readBytes(bytes);
         return new String(bytes, StandardCharsets.UTF_8);
-    }
-
-    private static String cleanHost(String host) {
-        String cleaned = host;
-        int terminator = cleaned.indexOf('\u0000');
-        if (terminator > -1) {
-            cleaned = cleaned.substring(0, terminator);
-        }
-        if (cleaned.endsWith(".")) {
-            cleaned = cleaned.substring(0, cleaned.length() - 1);
-        }
-        return cleaned;
     }
 }
