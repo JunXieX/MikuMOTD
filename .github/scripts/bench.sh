@@ -165,6 +165,8 @@ start_proxy() {
           return 1
         fi
       fi
+      # 预热缓冲：部分插件的缓存定时器在 Done 后才首跑，立即压测会打在未预热缓存上
+      sleep 2
       return 0
     fi
     if ! kill -0 "$(cat "$WORK/$name.pid")" 2>/dev/null; then
