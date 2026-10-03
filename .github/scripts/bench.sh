@@ -165,8 +165,13 @@ start_proxy() {
           return 1
         fi
       fi
-      # 预热缓冲：部分插件的缓存定时器在 Done 后才首跑，立即压测会打在未预热缓存上
-      sleep 2
+      # 探活：部分插件的响应缓存要等首次定时刷新才就绪，等到一次完整 ping 成功再进入测量
+      for _ in $(seq 1 15); do
+        if "$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
       return 0
     fi
     if ! kill -0 "$(cat "$WORK/$name.pid")" 2>/dev/null; then
