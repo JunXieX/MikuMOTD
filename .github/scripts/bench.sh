@@ -8,6 +8,8 @@ DIR=bench-run
 VELOCITY_JAR=$DIR/velocity.jar
 PLUGIN_JAR=$(ls build/libs/MikuMOTD-*.jar)
 RIVAL_JAR=$DIR/MikuFastMOTD-1.0.0.jar
+MIKU130_JAR=$DIR/MikuMOTD-1.3.0.jar
+MIKU140_JAR=$DIR/MikuMOTD-1.4.0.jar
 PORT=25565
 ROUNDS=${BENCH_ROUNDS:-3}
 LATENCY_RUNS=${BENCH_LATENCY_RUNS:-2000}
@@ -22,6 +24,9 @@ mkdir -p "$WORK"
 : > "$RESULTS"
 # 六方对比的第六场景（MikuFastMOTD）使用预构建二进制（bench-deps release 资产）
 curl -sL --retry 3 -o "$WORK/MikuFastMOTD-1.0.0.jar" "https://github.com/JunXieX/MikuMOTD/releases/download/bench-deps-v1/MikuFastMOTD-1.0.0.jar"
+# 版本对比：v1.3.0（功能全）与 v1.4.0（精简）的官方 release 二进制
+curl -sL --retry 3 -o "$WORK/MikuMOTD-1.3.0.jar" "https://github.com/JunXieX/MikuMOTD/releases/download/v1.3.0/MikuMOTD-1.3.0.jar"
+curl -sL --retry 3 -o "$WORK/MikuMOTD-1.4.0.jar" "https://github.com/JunXieX/MikuMOTD/releases/download/v1.4.0/MikuMOTD-1.4.0.jar"
 
 # 代理与压测客户端统一使用工作流指定的 JDK，避免 runner 默认 PATH 上存在旧版本 java
 JCMD="${JAVA_HOME:-}/bin/java"
@@ -113,6 +118,48 @@ CONF
     rival)
       # MikuFastMOTD：预构建二进制，使用其自生成默认配置
       cp "$RIVAL_JAR" "$target/"
+      ;;
+    miku130)
+      # v1.3.0（功能全版本）：1.3.0 时代的配置键，渲染结果与 miku140 对齐
+      cp "$MIKU130_JAR" "$target/"
+      cat > "$target/mikumotd/config.conf" <<CONF
+general {
+    update-interval-ms=3000
+    direct-write=true
+    compat-mode=false
+    text-format=LEGACY_AMPERSAND
+    png-quality=-1
+    allow-improper-pings=false
+}
+players {
+    max-count-type=FIXED
+    max-count=1000
+    fake-online-fixed=0
+    fake-online-percent=0
+}
+motd {
+    version-name="Benchmark"
+    descriptions=["&aBenchmark MOTD line one"]
+    favicons=[]
+    player-list=[]
+    player-list-source="static"
+}
+maintenance {
+    enabled=false
+}
+CONF
+      ;;
+    miku140)
+      # v1.4.0（精简版本）：1.4.0 配置键，渲染结果与 miku130 对齐
+      cp "$MIKU140_JAR" "$target/"
+      cat > "$target/mikumotd/config.conf" <<CONF
+logo="none"
+motd="<green>Benchmark MOTD line one"
+max-players=1000
+update-interval-ms=3000
+direct-write=true
+compat-mode=false
+CONF
       ;;
   esac
 }
@@ -216,6 +263,8 @@ scenario_label() {
     bare) echo "裸代理（无插件）" ;;
     minimotd) echo "MiniMOTD" ;;
     rival) echo "MikuFastMOTD" ;;
+    miku130) echo "MikuMOTD v1.3.0" ;;
+    miku140) echo "MikuMOTD v1.4.0" ;;
     fastmotd) echo "FastMOTD" ;;
     compat) echo "MikuMOTD 事件模式" ;;
     fast) echo "MikuMOTD 快速路径" ;;
@@ -225,7 +274,7 @@ scenario_label() {
 SCENARIOS=(bare)
 [ -z "${SKIPPED[minimotd]:-}" ] && SCENARIOS+=(minimotd)
 [ -z "${SKIPPED[fastmotd]:-}" ] && SCENARIOS+=(fastmotd)
-SCENARIOS+=(rival compat fast)
+SCENARIOS+=(rival miku130 miku140 compat fast)
 
 echo "== 场景交替测量（共 $ROUNDS 轮）=="
 declare -A SCENARIO_FAILED
@@ -258,7 +307,7 @@ median() {
   echo
   echo "| 场景 | 平均延迟（µs/完整 ping） | QPS（${BENCH_THREADS} 线程 × ${BENCH_SECONDS}s） | 最大失败数 |"
   echo "|---|---|---|---|"
-  for scenario in bare minimotd fastmotd rival compat fast; do
+  for scenario in bare minimotd fastmotd rival miku130 miku140 compat fast; do
     if [ -n "${SKIPPED[$scenario]:-}" ]; then
       printf '| %s | 构建失败，跳过 | - | - |\n' "$(scenario_label "$scenario")"
       continue
