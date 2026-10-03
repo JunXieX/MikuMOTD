@@ -274,7 +274,9 @@ scenario_label() {
 SCENARIOS=(bare)
 [ -z "${SKIPPED[minimotd]:-}" ] && SCENARIOS+=(minimotd)
 [ -z "${SKIPPED[fastmotd]:-}" ] && SCENARIOS+=(fastmotd)
-SCENARIOS+=(rival miku130 miku140 compat fast)
+# rival（mikufastmotd）与 miku130/miku140（版本对比）场景的 make_plugins 分支保留，
+# 需要时把对应名字加回下方序列；rival 在 CI 的 Linux 环境下无法运行（静默关闭 ping）
+SCENARIOS+=(compat fast)
 
 echo "== 场景交替测量（共 $ROUNDS 轮）=="
 declare -A SCENARIO_FAILED
