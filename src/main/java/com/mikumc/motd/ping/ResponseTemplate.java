@@ -124,10 +124,12 @@ public final class ResponseTemplate {
         this.lastFingerprint = fingerprint;
         ResponseTemplate.Offsets offsets = new ResponseTemplate.Offsets();
         ByteBuf fresh = this.renderFrame(online, max, sample, offsets);
-        this.fullFrame = fresh;
-        this.compatPing = this.buildCompat(online, max, sample);
+        // 发布顺序：偏移与锚定状态必须先于新帧就绪（acquire 在事件循环线程
+        // 读到的组合永远是「新帧 + 新偏移 + 待锚定」），否则新帧会被旧偏移写坏
         this.applyOffsets(offsets);
         this.anchoredProtocol = -1;
+        this.compatPing = this.buildCompat(online, max, sample);
+        this.fullFrame = fresh;
         old.release();
     }
 

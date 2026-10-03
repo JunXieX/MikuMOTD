@@ -8,7 +8,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import java.nio.charset.StandardCharsets;
 
 /**
  * 状态查询的快速路径：挂在帧解码器之后的入站处理器，直接在字节层面
@@ -78,7 +77,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             throw new IndexOutOfBoundsException("握手包号异常 0x" + Integer.toHexString(packetId));
         }
         int protocol = readVarInt(buf);
-        readString(buf);
+        skipString(buf);
         if (buf.readableBytes() < 3) {
             throw new IndexOutOfBoundsException("handshake too short");
         }
@@ -196,13 +195,12 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         }
     }
 
-    private static String readString(ByteBuf buf) {
+    /** 跳过握手包内的主机名字符串：内容不参与任何逻辑，仅校验边界（零分配）。 */
+    private static void skipString(ByteBuf buf) {
         int length = readVarInt(buf);
         if (length < 0 || length > MAX_HOST_LENGTH || length > buf.readableBytes()) {
             throw new IndexOutOfBoundsException("bad string length " + length);
         }
-        byte[] bytes = new byte[length];
-        buf.readBytes(bytes);
-        return new String(bytes, StandardCharsets.UTF_8);
+        buf.skipBytes(length);
     }
 }

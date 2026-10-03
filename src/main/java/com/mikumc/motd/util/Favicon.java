@@ -67,6 +67,8 @@ public final class Favicon {
     private static BufferedImage scale(BufferedImage source, int width, int height) {
         BufferedImage target = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
         Graphics2D graphics = target.createGraphics();
+        graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
         graphics.drawImage(source, 0, 0, width, height, null);
         graphics.dispose();
         return target;
