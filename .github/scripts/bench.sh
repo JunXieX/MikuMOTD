@@ -309,7 +309,7 @@ median() {
   echo
   echo "| 场景 | 平均延迟（µs/完整 ping） | QPS（${BENCH_THREADS} 线程 × ${BENCH_SECONDS}s） | 最大失败数 |"
   echo "|---|---|---|---|"
-  for scenario in bare minimotd fastmotd rival miku130 miku140 compat fast; do
+  for scenario in bare minimotd fastmotd compat fast; do
     if [ -n "${SKIPPED[$scenario]:-}" ]; then
       printf '| %s | 构建失败，跳过 | - | - |\n' "$(scenario_label "$scenario")"
       continue
