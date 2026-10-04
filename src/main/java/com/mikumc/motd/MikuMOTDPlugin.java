@@ -44,7 +44,7 @@ import org.slf4j.Logger;
 @Plugin(
         id = "mikumotd",
         name = "MikuMOTD",
-        version = "1.5.0",
+        version = "1.6.0",
         description = "MikuMC 服务器原创插件，作者 JunXieX，交流群 1105054380",
         authors = {"JunXieX"}
 )
