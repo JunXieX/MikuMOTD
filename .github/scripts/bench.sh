@@ -98,7 +98,7 @@ make_plugins() {
       ;;
     compat | fast)
       cp "$PLUGIN_JAR" "$target/"
-      cat > "$target/mikumotd/config.conf" <<CONF
+      cat > "$target/MikuMOTD/config.conf" <<CONF
 logo="none"
 motd="&aBenchmark MOTD line one"
 max-players=1000
@@ -122,7 +122,7 @@ CONF
     miku130)
       # v1.3.0（功能全版本）：1.3.0 时代的配置键，渲染结果与 miku140 对齐
       cp "$MIKU130_JAR" "$target/"
-      cat > "$target/mikumotd/config.conf" <<CONF
+      cat > "$target/MikuMOTD/config.conf" <<CONF
 general {
     update-interval-ms=3000
     direct-write=true
@@ -152,7 +152,7 @@ CONF
     miku140)
       # v1.4.0（精简版本）：1.4.0 配置键，渲染结果与 miku130 对齐
       cp "$MIKU140_JAR" "$target/"
-      cat > "$target/mikumotd/config.conf" <<CONF
+      cat > "$target/MikuMOTD/config.conf" <<CONF
 logo="none"
 motd="<green>Benchmark MOTD line one"
 max-players=1000

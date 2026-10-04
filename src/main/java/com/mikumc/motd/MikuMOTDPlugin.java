@@ -7,13 +7,13 @@ import com.mikumc.motd.config.MikuConfig;
 import com.mikumc.motd.inject.Injector;
 import com.mikumc.motd.ping.ResponseTemplate;
 import com.mikumc.motd.util.Favicon;
+import com.mikumc.motd.util.VanishSupport;
 import com.velocitypowered.api.command.CommandManager;
 import com.velocitypowered.api.command.CommandMeta;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
-import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.scheduler.ScheduledTask;
@@ -23,6 +23,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import net.kyori.adventure.text.Component;
@@ -53,7 +55,7 @@ public final class MikuMOTDPlugin {
 
     private final ProxyServer proxy;
     private final Logger logger;
-    private final Path dataDirectory;
+    private final Path dataDirectory = Path.of("plugins", "MikuMOTD");
     private final AtomicLong lastFaultLog = new AtomicLong();
     private final Object reloadLock = new Object();
 
@@ -63,10 +65,9 @@ public final class MikuMOTDPlugin {
     private volatile ScheduledTask refreshTask;
 
     @Inject
-    public MikuMOTDPlugin(ProxyServer proxy, Logger logger, @DataDirectory Path dataDirectory) {
+    public MikuMOTDPlugin(ProxyServer proxy, Logger logger) {
         this.proxy = proxy;
         this.logger = logger;
-        this.dataDirectory = dataDirectory;
     }
 
     @Subscribe
@@ -135,7 +136,7 @@ public final class MikuMOTDPlugin {
                     "MikuMOTD",
                     faviconUrl,
                     0,
-                    this.proxy.getPlayerCount(),
+                    this.visiblePlayerCount(),
                     this.maxPlayers(config),
                     this.currentSample());
 
@@ -170,7 +171,7 @@ public final class MikuMOTDPlugin {
         if (template == null) {
             return;
         }
-        template.update(this.proxy.getPlayerCount(), this.maxPlayers(this.config), this.currentSample());
+        template.update(this.visiblePlayerCount(), this.maxPlayers(this.config), this.currentSample());
     }
 
     /** 人数上限：插件覆盖值优先，0 沿用代理原生 show-max-players。 */
@@ -182,9 +183,22 @@ public final class MikuMOTDPlugin {
         return override > 0 ? override : this.proxy.getConfiguration().getShowMaxPlayers();
     }
 
-    /** 真实在线玩家快照：按 UUID 排序保证展示顺序稳定（与原生代理同为 12 行上限）。 */
+    /** 可见在线人数：安装了 MikuVanish 时剔除隐身玩家，否则为总在线数。 */
+    private int visiblePlayerCount() {
+        Set<UUID> vanished = VanishSupport.vanishedPlayers();
+        if (vanished.isEmpty()) {
+            return this.proxy.getPlayerCount();
+        }
+        return (int) this.proxy.getAllPlayers().stream()
+                .filter(player -> !vanished.contains(player.getUniqueId()))
+                .count();
+    }
+
+    /** 真实在线玩家快照：剔除隐身玩家，按 UUID 排序（与原生代理同为 12 行上限）。 */
     private List<ResponseTemplate.SampleEntry> currentSample() {
+        Set<UUID> vanished = VanishSupport.vanishedPlayers();
         List<Player> online = new ArrayList<>(this.proxy.getAllPlayers());
+        online.removeIf(player -> vanished.contains(player.getUniqueId()));
         online.sort(Comparator.comparing(Player::getUniqueId));
         if (online.size() > ResponseTemplate.MAX_SAMPLE_ROWS) {
             online = online.subList(0, ResponseTemplate.MAX_SAMPLE_ROWS);
@@ -254,7 +268,7 @@ public final class MikuMOTDPlugin {
                 .append(Component.text(" — ", NamedTextColor.DARK_GRAY))
                 .append(Component.text("模式：" + mode, NamedTextColor.GREEN))
                 .append(Component.text(" ｜ 人数上限：" + this.maxPlayers(config), NamedTextColor.AQUA))
-                .append(Component.text(" ｜ 在线：" + this.proxy.getPlayerCount(), NamedTextColor.AQUA))
+                .append(Component.text(" ｜ 在线：" + this.visiblePlayerCount(), NamedTextColor.AQUA))
                 .append(Component.text(" ｜ 刷新间隔：" + config.updateIntervalMs() + "ms",
                         NamedTextColor.GRAY))
                 .build();
