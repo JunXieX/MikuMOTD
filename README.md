@@ -16,6 +16,7 @@ MikuMC 系列插件交流群：1105054380
 - **MOTD 文本**：支持 MiniMessage 全语法（渐变、粗体等），`{NL}` 换行
 - **人数上限**：可覆盖显示值，缺省沿用 velocity.toml 的 show-max-players
 - **真实玩家列表**：与原生代理一致的悬停玩家展示（按 UUID 排序，最多 12 行，随刷新周期自动更新）
+- **MikuVanish 联动**：安装 MikuVanish 后自动从在线人数与玩家列表中剔除隐身玩家（软依赖，未安装则无感知）
 - **热重载**：/mikumotd reload 即时生效，重载失败时保留旧配置继续运行
 
 真实玩家列表与在线人数恒为代理真实数据，不做任何伪造。
@@ -24,7 +25,7 @@ MikuMC 系列插件交流群：1105054380
 
 1. 服务器要求：Velocity 4.x（按 4.2.0 构建），Java 25 及以上
 2. 将 MikuMOTD-x.y.z.jar 放入 plugins/ 目录，启动代理
-3. 首次启动生成 plugins/mikumotd/config.conf，按需修改后 /mikumotd reload
+3. 首次启动生成 plugins/MikuMOTD/config.conf，按需修改后 /mikumotd reload
 
 ## 命令与权限
 
