@@ -6,12 +6,43 @@ plugins {
 }
 
 group = "com.mikumc"
-version = "1.6.0"
+version = "1.6.1"
 
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(25))
     }
+}
+
+// 构建期生成版本常量：@Plugin 注解只能取编译期常量，源码里不再重复写版本号
+val generateBuildInfo = tasks.register("generateBuildInfo") {
+    val outputDir = layout.buildDirectory.dir("generated/sources/buildinfo/java")
+    val pluginVersion = project.version.toString()
+    inputs.property("version", pluginVersion)
+    outputs.dir(outputDir)
+    doLast {
+        val packageDir = outputDir.get().asFile.resolve("com/mikumc/motd")
+        packageDir.mkdirs()
+        packageDir.resolve("BuildInfo.java").writeText(
+            """
+            |package com.mikumc.motd;
+            |
+            |/** 构建期生成：版本号的唯一来源是 build.gradle.kts 的 version。 */
+            |public final class BuildInfo {
+            |
+            |    public static final String VERSION = "$pluginVersion";
+            |
+            |    private BuildInfo() {
+            |    }
+            |}
+            |
+            """.trimMargin()
+        )
+    }
+}
+
+sourceSets.main {
+    java.srcDir(generateBuildInfo)
 }
 
 // MikuMOTD 的快速路径建立在 Velocity 代理的内部网络实现之上，
@@ -53,7 +84,7 @@ val downloadVelocityProxy = tasks.register("downloadVelocityProxy") {
     }
 }
 
-tasks.named("compileJava") { dependsOn(downloadVelocityProxy) }
+// 所有编译任务（含测试编译）都需要代理 jar 提供的内部类
 tasks.withType<JavaCompile>().configureEach { dependsOn(downloadVelocityProxy) }
 
 repositories {

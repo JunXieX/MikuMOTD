@@ -2,9 +2,11 @@
 
 ## 声明
 
-本项目为 MikuMC 服务器原创插件，公开给大众免费使用，MikuMC 服务器与作者 JunXieX 享有项目著作权，本项目非开源项目，请注意。
+本项目为 MikuMC 服务器原创插件，作者：JunXieX，公开给大众免费使用，MikuMC 服务器与作者 JunXieX 享有项目著作权，本项目非开源项目，请注意。
 
 MikuMC 系列插件交流群：1105054380
+
+非开源项目，请勿二次分发
 
 ---
 
@@ -17,7 +19,7 @@ MikuMC 系列插件交流群：1105054380
 - **人数上限**：可覆盖显示值，缺省沿用 velocity.toml 的 show-max-players
 - **真实玩家列表**：与原生代理一致的悬停玩家展示（按 UUID 排序，最多 12 行，随刷新周期自动更新）
 - **MikuVanish 联动**：安装 MikuVanish 后自动从在线人数与玩家列表中剔除隐身玩家（软依赖，未安装则无感知）
-- **热重载**：/mikumotd reload 即时生效，重载失败时保留旧配置继续运行
+- **热重载**：/mikumotd reload 即时生效（含 compat-mode 模式切换），重载失败时保留旧配置继续运行
 
 真实玩家列表与在线人数恒为代理真实数据，不做任何伪造。
 
@@ -32,7 +34,7 @@ MikuMC 系列插件交流群：1105054380
 | 命令 | 说明 | 权限节点 |
 |---|---|---|
 | /mikumotd info | 查看运行模式、人数上限与在线人数 | mikumotd.command.info |
-| /mikumotd reload | 重载配置 | mikumotd.command.reload |
+| /mikumotd reload | 重载配置（含模式切换） | mikumotd.command.reload |
 
 ## 配置
 
@@ -47,7 +49,7 @@ max-players=0
 update-interval-ms=1000
 # true：直写连接出站缓冲（最快）；false：走 Netty 标准 write 路径
 direct-write=true
-# 强制使用事件模式（快速路径注入失败时插件会自动回退，仅性能不同）
+# 强制使用事件模式（快速路径注入失败时插件会自动回退，仅性能不同）；改动可热重载
 compat-mode=false
 # log-pings / log-improper-pings / allow-improper-pings：诊断与安全选项，默认关闭
 ```

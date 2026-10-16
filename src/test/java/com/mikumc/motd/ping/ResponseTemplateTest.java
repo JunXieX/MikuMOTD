@@ -2,14 +2,19 @@ package com.mikumc.motd.ping;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.mikumc.motd.ping.ResponseTemplate.SampleEntry;
+import com.velocitypowered.api.proxy.server.ServerPing;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -35,6 +40,26 @@ class ResponseTemplateTest {
 
     @Test
     void byteOffsetCountsSurrogatePairAsFour() {
+        assertEquals(5, ResponseTemplate.byteOffsetOf("a😀b", 3));
+    }
+
+    /**
+     * 孤立代理项在 UTF-8 编码时被替换为 '?'（单字节），若按 3 字节累计会让
+     * 其后所有数字槽整体漂移，进而把人数/协议写到错误的 JSON 位置。
+     */
+    @Test
+    void byteOffsetTreatsLoneSurrogateAsSingleByte() {
+        String loneHigh = "a\uD83Db";   // 不成对的高代理项
+        String loneLow = "a\uDE00b";    // 不成对的低代理项
+        for (String sample : List.of(loneHigh, loneLow)) {
+            // 累计值必须与真实编码字节数一致（这正是偏移不漂移的前提）
+            assertEquals(sample.getBytes(StandardCharsets.UTF_8).length,
+                    ResponseTemplate.byteOffsetOf(sample, sample.length()),
+                    "孤立代理项应计为 1 字节：" + sample);
+        }
+        assertEquals(3, ResponseTemplate.byteOffsetOf(loneHigh, 3));
+        assertEquals(3, ResponseTemplate.byteOffsetOf(loneLow, 3));
+        // 紧邻的成对代理项仍按 4 字节计
         assertEquals(5, ResponseTemplate.byteOffsetOf("a😀b", 3));
     }
 
@@ -128,6 +153,126 @@ class ResponseTemplateTest {
             readFrameJson(template.acquire(773));
             String next = readFrameJson(template.acquire(758));
             assertTrue(next.contains("\"protocol\":      758"), "异协议 ping 应重锚协议号：" + next);
+        } finally {
+            template.dispose();
+        }
+    }
+
+    /** 刷新会用人数位数更多的新帧替换旧帧：偶数位宽变化也不得让协议槽错位。 */
+    @Test
+    void updateKeepsProtocolSlotAlignedAfterWidthChange() {
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"x\"}", "v", null, 0, 0, 1, List.of());
+        try {
+            template.update(9_999_999, 9_999_999, List.of());
+            String json = readFrameJson(template.acquire(770));
+            assertTrue(json.contains("\"online\": 9999999,"), "在线人数：" + json);
+            assertTrue(json.contains("\"max\": 9999999,"), "最大人数：" + json);
+            assertTrue(json.contains("\"protocol\":      770"), "协议号：" + json);
+        } finally {
+            template.dispose();
+        }
+    }
+
+    /** 销毁后必须彻底失效：不再返回帧，也不允许刷新把已释放的帧「复活」。 */
+    @Test
+    void disposeInvalidatesTemplateAndBlocksResurrection() {
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"x\"}", "v", null, 0, 0, 1, List.of());
+        template.dispose();
+        assertNull(template.acquire(773), "销毁后不应再返回帧");
+        assertNull(template.acquireCompat(), "销毁后不应再返回兜底 ping");
+
+        // 重载/关服竞态：destroy 之后到达的刷新不得重建帧（否则永久泄漏）
+        template.update(5, 10, List.of(new SampleEntry(UUID.randomUUID(), "late")));
+        assertNull(template.acquire(773), "销毁后的刷新不得复活帧");
+        // 幂等：重复 dispose 不应异常
+        template.dispose();
+    }
+
+    /** 帧被外部持有（引用计数 > 0）时销毁不得释放底层内存，否则读方会用到已释放缓冲区。 */
+    @Test
+    void disposeDoesNotFreeFrameWhileDuplicateOutstanding() {
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"x\"}", "v", null, 0, 0, 1, List.of());
+        ByteBuf held = template.acquire(773);
+        assertNotNull(held);
+        template.dispose();
+        try {
+            assertEquals(1, held.refCnt(), "持有中的切片必须仍然有效");
+            assertTrue(readFrameJson(held).contains("\"protocol\":      773"), "已取出的帧内容仍可读");
+        } finally {
+            held.release();
+        }
+        assertEquals(0, held.refCnt(), "释放后切片引用计数归零");
+    }
+
+    /** 并发「刷新 + 高频取帧」不得抛异常，且每帧都能被完整解析。 */
+    @Test
+    void concurrentUpdateAndAcquireStaysConsistent() throws Exception {
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"并发😀\"}", "MikuMOTD", null, 0, 0, 1, List.of());
+        AtomicBoolean failed = new AtomicBoolean();
+        CountDownLatch done = new CountDownLatch(3);
+        Runnable reader = () -> {
+            try {
+                for (int i = 0; i < 20_000; i++) {
+                    ByteBuf frame = template.acquire(773);
+                    if (frame == null) {
+                        continue;
+                    }
+                    try {
+                        String json = readFrameJson(frame);
+                        if (!json.contains("\"protocol\":      773")) {
+                            failed.set(true);
+                            return;
+                        }
+                    } finally {
+                        frame.release();
+                    }
+                }
+            } catch (Throwable t) {
+                failed.set(true);
+            } finally {
+                done.countDown();
+            }
+        };
+        Thread a = new Thread(reader);
+        Thread b = new Thread(reader);
+        Thread writer = new Thread(() -> {
+            try {
+                for (int i = 0; i < 2_000; i++) {
+                    template.update(i, 1_000 + i, List.of(
+                            new SampleEntry(UUID.randomUUID(), "玩家" + i)));
+                }
+            } catch (Throwable t) {
+                failed.set(true);
+            } finally {
+                done.countDown();
+            }
+        });
+        a.start();
+        b.start();
+        writer.start();
+        assertTrue(done.await(60, TimeUnit.SECONDS), "并发测试未在限时内完成");
+        template.dispose();
+        assertTrue(!failed.get(), "并发读写不应产生异常或错位");
+    }
+
+    @Test
+    void compatPingCarriesCountsSampleAndVersion() {
+        UUID id = UUID.randomUUID();
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"hello\"}", "MikuMOTD", null, 0, 3, 20,
+                List.of(new SampleEntry(id, "玩家甲")));
+        try {
+            ServerPing ping = template.acquireCompat();
+            assertNotNull(ping);
+            assertEquals(3, ping.getPlayers().orElseThrow().getOnline());
+            assertEquals(20, ping.getPlayers().orElseThrow().getMax());
+            assertEquals("玩家甲", ping.getPlayers().orElseThrow().getSample().get(0).getName());
+            assertEquals(id, ping.getPlayers().orElseThrow().getSample().get(0).getId());
+            assertEquals("MikuMOTD", ping.getVersion().getName());
         } finally {
             template.dispose();
         }

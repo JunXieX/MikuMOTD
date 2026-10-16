@@ -13,8 +13,7 @@ import javax.imageio.stream.ImageOutputStream;
 
 /**
  * 服务器图标的加载与规范化：任意尺寸的 PNG 会被缩放到客户端要求的 64x64，
- * 并可按配置质量重新编码以压缩最终嵌入 MOTD JSON 的字节数。
- * 该流程只在（重）加载配置时执行，不在 ping 路径上。
+ * 再重新编码为无冗余数据的 PNG。该流程只在（重）加载配置时执行，不在 ping 路径上。
  */
 public final class Favicon {
 
@@ -29,14 +28,14 @@ public final class Favicon {
      *                 空串/"none" 表示无图标
      * @return 嵌入 MOTD JSON 的 data URL；无图标返回 null
      */
-    public static String load(String location, Path dataDirectory, double quality) throws IOException {
+    public static String load(String location, Path dataDirectory) throws IOException {
         if (location == null || location.isBlank() || location.equalsIgnoreCase("none")) {
             return null;
         }
 
         byte[] bytes;
         if (location.startsWith(DATA_URL_PREFIX)) {
-            bytes = Base64.getDecoder().decode(location.substring(DATA_URL_PREFIX.length()));
+            bytes = decodeDataUrl(location);
         } else {
             Path file = Path.of(location);
             if (!file.isAbsolute()) {
@@ -55,13 +54,17 @@ public final class Favicon {
         if (image.getWidth() != ICON_SIZE || image.getHeight() != ICON_SIZE) {
             image = scale(image, ICON_SIZE, ICON_SIZE);
         }
-        if (quality >= 0.0D && quality < 1.0D) {
-            bytes = recompress(image, quality);
-        } else {
-            bytes = encode(image);
-        }
 
-        return DATA_URL_PREFIX + Base64.getEncoder().encodeToString(bytes);
+        return DATA_URL_PREFIX + Base64.getEncoder().encodeToString(encode(image));
+    }
+
+    /** data URL 解析：非法 base64 统一包装为 IOException，交给调用方按「无图标」降级。 */
+    private static byte[] decodeDataUrl(String location) throws IOException {
+        try {
+            return Base64.getDecoder().decode(location.substring(DATA_URL_PREFIX.length()));
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Malformed base64 data URL", e);
+        }
     }
 
     private static BufferedImage scale(BufferedImage source, int width, int height) {
@@ -78,22 +81,6 @@ public final class Favicon {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (ImageOutputStream imageOut = ImageIO.createImageOutputStream(out)) {
             ImageIO.write(image, "png", imageOut);
-        }
-        return out.toByteArray();
-    }
-
-    private static byte[] recompress(BufferedImage image, double quality) throws IOException {
-        var writer = ImageIO.getImageWritersByFormatName("png").next();
-        var parameters = writer.getDefaultWriteParam();
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (ImageOutputStream imageOut = ImageIO.createImageOutputStream(out)) {
-            if (parameters.canWriteCompressed()) {
-                parameters.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
-                parameters.setCompressionQuality((float) quality);
-            }
-            writer.setOutput(imageOut);
-            writer.write(null, new javax.imageio.IIOImage(image, null, null), parameters);
-            writer.dispose();
         }
         return out.toByteArray();
     }
