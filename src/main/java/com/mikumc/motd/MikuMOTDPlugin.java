@@ -128,21 +128,21 @@ public final class MikuMOTDPlugin implements FastPathHost {
     /**
      * 切换响应模式（可重复调用；只改开关，不增删注入）。
      *
+     * <p>调用前必须先执行 {@link #installHook()}：未注入成功时这里会保持事件模式。
+     * 注入本身的失败已由 {@code Injector} 带堆栈记录，此处不再重复告警——
+     * 否则在「先 reload、后注入」的调用顺序下会把正常流程误报成失败。</p>
+     *
      * <p>快速路径的挂载点 {@code Hook} 在插件启用时安装一次，之后每条新连接建立时
      * 读取 {@link #fastPathEnabled()}，因此 compat-mode 的热重载对之后的所有连接
      * 立即生效，两个方向都有效。兜底监听器常驻，负责覆盖快速路径不会接管的连接。</p>
      */
     private void applyMode(boolean wantFastPath) {
-        if (wantFastPath && !this.injected) {
-            // 注入失败（代理内部结构变更）：保持事件模式，功能不受影响
-            this.logger.warn("快速路径注入失败，继续使用事件模式（功能不受影响，仅吞吐较低）");
+        boolean enable = wantFastPath && this.injected;
+        if (this.fastPath == enable) {
             return;
         }
-        if (this.fastPath == wantFastPath) {
-            return;
-        }
-        this.fastPath = wantFastPath;
-        this.logger.info(wantFastPath
+        this.fastPath = enable;
+        this.logger.info(enable
                 ? "已切换到快速路径（字节级状态响应）"
                 : "已切换到事件模式（新连接不再走快速路径）");
     }
@@ -214,7 +214,9 @@ public final class MikuMOTDPlugin implements FastPathHost {
             }
 
             this.rescheduleRefreshTask(config);
-            // 让 compat-mode 的改动即时生效（未变化时为空操作）
+            // 保留原配置 → 新建状态 → 切换模式。注入必须先于模式切换：
+            // applyMode 依据 injected 决定能否启用快速路径，顺序颠倒会把首次启动误判为注入失败
+            this.installHook();
             this.applyMode(!config.compatMode());
             this.logger.info("配置已加载（logo：{}，人数上限：{}）",
                     config.logo(), this.maxPlayers(config));
