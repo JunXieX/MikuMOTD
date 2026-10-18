@@ -18,7 +18,12 @@ public final class CompatListener {
         this.plugin = plugin;
     }
 
-    @Subscribe(priority = 200)
+    /**
+     * {@code priority} 越大越早执行（Velocity 按降序排列监听器），
+     * 因此取 {@link Short#MIN_VALUE} 让本监听器最后运行：
+     * 事件模式下本插件的 MOTD 才能最终生效，而不是被其它 MOTD 插件覆盖。
+     */
+    @Subscribe(priority = Short.MIN_VALUE)
     public void onPing(ProxyPingEvent event) {
         ServerPing base = this.plugin.statusPing();
         if (base == null) {

@@ -4,6 +4,7 @@ import com.google.inject.Inject;
 import com.mikumc.motd.command.MikuCommand;
 import com.mikumc.motd.compat.CompatListener;
 import com.mikumc.motd.config.MikuConfig;
+import com.mikumc.motd.inject.FastPathHost;
 import com.mikumc.motd.inject.Injector;
 import com.mikumc.motd.ping.ResponseTemplate;
 import com.mikumc.motd.util.Favicon;
@@ -52,7 +53,7 @@ import org.slf4j.Logger;
         description = "MikuMC 服务器原创插件，作者 JunXieX，交流群 1105054380",
         authors = {"JunXieX"}
 )
-public final class MikuMOTDPlugin {
+public final class MikuMOTDPlugin implements FastPathHost {
 
     private static final long FAULT_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
     private static final GsonComponentSerializer GSON = GsonComponentSerializer.gson();
@@ -68,8 +69,13 @@ public final class MikuMOTDPlugin {
     }
 
     private volatile RuntimeState runtime;
+    /** 快速路径是否已注入（注入只需一次，之后由 fastPathEnabled 控制每条连接的行为）。 */
+    private volatile boolean injected;
+    /** 当前是否启用快速路径；每条新连接建立时读取。 */
     private volatile boolean fastPath;
-    /** 兜底监听器实例：仅在事件模式下注册，重载切模式时需要精确注销。 */
+    /** 关服后置位：阻止关服竞态中到达的 reload 重新发布快照。 */
+    private boolean shuttingDown;
+    /** 兜底监听器：插件启用时注册一次并常驻（快速路径消费的连接不会触达它）。 */
     private volatile CompatListener compatListener;
     /** 调度线程、配置线程与关服线程共享，故必须是 volatile。 */
     private volatile ScheduledTask refreshTask;
@@ -88,10 +94,20 @@ public final class MikuMOTDPlugin {
             // 配置非法等也走这里；保底注册事件模式与命令，让 /mikumotd reload 可用
             this.logger.error("配置加载失败，修正 plugins/MikuMOTD/config.conf 后执行 /mikumotd reload", e);
         }
+        // 兜底监听器始终注册：快速路径自行消费的连接不会触发 ProxyPingEvent，
+        // 因此它不会形成第二条响应路径；真正受益的是快速路径覆盖不到的那部分连接
+        // ——legacy ping（0xFE，旧客户端与部分探活工具）以及个别连接挂载失败的情况，
+        // 它们同样应显示本插件配置的 MOTD，而不是回落成代理原生 MOTD。
+        this.registerCompat();
+        // Hook 无条件安装（即使当前是事件模式）：连接初始化器在端口绑定时就被固化进
+        // ServerBootstrap，之后再装对已监听端口无效。Hook 内部按当前配置决定每条连接
+        // 是否挂载快速路径，因此装一次即可让 compat-mode 的热切换双向生效。
+        this.installHook();
         // 配置非法（runtime 为空）时不启用快速路径：事件模式下 ping 交还原生代理，
         // 比快速路径「无帧可取 → 关连接」更合理
         RuntimeState current = this.runtime;
         this.applyMode(current != null && !current.config().compatMode());
+        this.logger.info("当前响应模式：{}", this.fastPath ? "快速路径（字节级）" : "事件模式（兜底）");
 
         CommandManager commands = this.proxy.getCommandManager();
         CommandMeta meta = commands.metaBuilder("mikumotd")
@@ -100,49 +116,41 @@ public final class MikuMOTDPlugin {
         commands.register(meta, new MikuCommand(this));
     }
 
+    private void installHook() {
+        if (this.injected) {
+            return;
+        }
+        if (Injector.inject(this, this.proxy) != null) {
+            this.injected = true;
+        }
+    }
+
     /**
-     * 在「快速路径」与「事件模式」之间按需切换（可重复调用，已处于目标状态时为空操作）。
+     * 切换响应模式（可重复调用；只改开关，不增删注入）。
      *
-     * <p>任何时刻都保证有且只有一条响应路径：转事件模式先注册再拆注入；转快速路径先注入成功
-     * 再注销兜底。两方向都把「先建立新路径、后拆除旧路径」作为顺序，因此不存在响应真空；
-     * 注入失败时保持事件模式，功能始终完整。</p>
+     * <p>快速路径的挂载点 {@code Hook} 在插件启用时安装一次，之后每条新连接建立时
+     * 读取 {@link #fastPathEnabled()}，因此 compat-mode 的热重载对之后的所有连接
+     * 立即生效，两个方向都有效。兜底监听器常驻，负责覆盖快速路径不会接管的连接。</p>
      */
     private void applyMode(boolean wantFastPath) {
-        if (!wantFastPath) {
-            if (this.compatListener != null) {
-                return;
-            }
-            this.registerCompat();
-            if (this.fastPath) {
-                Injector.restore(this, this.proxy);
-                this.fastPath = false;
-            }
-            this.logger.info("已启用事件模式兜底");
+        if (wantFastPath && !this.injected) {
+            // 注入失败（代理内部结构变更）：保持事件模式，功能不受影响
+            this.logger.warn("快速路径注入失败，继续使用事件模式（功能不受影响，仅吞吐较低）");
             return;
         }
-
-        if (this.fastPath) {
+        if (this.fastPath == wantFastPath) {
             return;
         }
-        if (Injector.inject(this, this.proxy) == null) {
-            // 注入失败：确保仍有响应路径（首次启动或从事件模式切换时）
-            if (this.compatListener == null) {
-                this.registerCompat();
-                this.logger.warn("快速路径注入失败，已回退到事件模式（功能不受影响，仅吞吐较低）");
-            }
-            return;
-        }
-        // 快速路径已在所有新连接上生效，事件模式下才注册的兜底监听器此时冗余
-        CompatListener listener = this.compatListener;
-        if (listener != null) {
-            this.proxy.getEventManager().unregisterListener(this, listener);
-            this.compatListener = null;
-        }
-        this.fastPath = true;
-        this.logger.info("已启用快速路径（字节级状态响应）");
+        this.fastPath = wantFastPath;
+        this.logger.info(wantFastPath
+                ? "已切换到快速路径（字节级状态响应）"
+                : "已切换到事件模式（新连接不再走快速路径）");
     }
 
     private void registerCompat() {
+        if (this.compatListener != null) {
+            return;
+        }
         CompatListener listener = new CompatListener(this);
         this.proxy.getEventManager().register(this, listener);
         this.compatListener = listener;
@@ -150,18 +158,21 @@ public final class MikuMOTDPlugin {
 
     @Subscribe
     public void onShutdown(ProxyShutdownEvent event) {
-        if (this.fastPath) {
-            Injector.restore(this, this.proxy);
-        }
-        ScheduledTask task = this.refreshTask;
-        if (task != null) {
-            // 已取消的任务可能仍在执行，runtime 置空后其 update 会被模板自行忽略
-            task.cancel();
-        }
-        RuntimeState current = this.runtime;
-        this.runtime = null;
-        if (current != null) {
-            current.template().dispose();
+        // 与 reload 互斥：避免关服瞬间的 /mikumotd reload 把新快照发布到已置空的运行时
+        synchronized (this.reloadLock) {
+            this.shuttingDown = true;
+            // 关服后不再接受新连接，无需撤销注入（也撤不掉已固化的 childHandler）
+            this.fastPath = false;
+            ScheduledTask task = this.refreshTask;
+            if (task != null) {
+                // 已取消的任务可能仍在执行，runtime 置空后其 update 会被模板自行忽略
+                task.cancel();
+            }
+            RuntimeState current = this.runtime;
+            this.runtime = null;
+            if (current != null) {
+                current.template().dispose();
+            }
         }
     }
 
@@ -170,6 +181,9 @@ public final class MikuMOTDPlugin {
      */
     public boolean reload() throws IOException {
         synchronized (this.reloadLock) {
+            if (this.shuttingDown) {
+                throw new IOException("代理正在关服，已忽略配置重载");
+            }
             MikuConfig config = new MikuConfig();
             config.load(this.dataDirectory.resolve("config.conf"));
 
@@ -270,10 +284,34 @@ public final class MikuMOTDPlugin {
     // 供快速路径（事件循环高频）调用的只读入口
     // ---------------------------------------------------------------------
 
-    /** 每次状态请求选择响应帧；插件未就绪或重载竞态时返回 null（连接将被关闭）。 */
+    @Override
+    public boolean fastPathEnabled() {
+        return this.fastPath;
+    }
+
+    /**
+     * 每次状态请求选择响应帧；插件未就绪或重载竞态时返回 null（连接将被关闭）。
+     *
+     * <p>重载会「先发布新快照、再销毁旧模板」。若 ping 恰好在销毁瞬间仍持有旧
+     * {@link RuntimeState}，取帧会失败；此时重读一次当前状态即可命中新模板，
+     * 避免把极窄的竞态窗口暴露成一次连接被断。</p>
+     */
     public ByteBuf selectResponse(int protocol) {
-        RuntimeState current = this.runtime;
-        return current == null ? null : current.template().acquire(protocol);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            RuntimeState current = this.runtime;
+            if (current == null) {
+                return null;
+            }
+            ByteBuf frame = current.template().acquire(protocol);
+            if (frame != null) {
+                return frame;
+            }
+            if (this.runtime == current) {
+                // 仍是同一代却取不到帧：模板确实未就绪，交由调用方关闭连接
+                return null;
+            }
+        }
+        return null;
     }
 
     /** 事件模式兜底取当前预构建 ping；未就绪时返回 null（交还原生代理行为）。 */

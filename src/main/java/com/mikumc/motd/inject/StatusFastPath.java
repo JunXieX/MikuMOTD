@@ -1,13 +1,14 @@
 package com.mikumc.motd.inject;
 
-import com.mikumc.motd.MikuMOTDPlugin;
 import com.velocitypowered.proxy.protocol.StateRegistry;
 import com.velocitypowered.proxy.protocol.netty.MinecraftDecoder;
 import com.velocitypowered.proxy.protocol.netty.MinecraftVarintFrameDecoder;
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOutboundBuffer;
+import io.netty.channel.ChannelPromise;
 
 /**
  * 状态查询的快速路径：挂在帧解码器之后的入站处理器，直接在字节层面
@@ -44,7 +45,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         CONSUMED
     }
 
-    private final MikuMOTDPlugin plugin;
+    private final FastPathHost host;
     private Phase phase = Phase.HANDSHAKE;
     private int protocol;
 
@@ -54,8 +55,8 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         PING
     }
 
-    public StatusFastPath(MikuMOTDPlugin plugin) {
-        this.plugin = plugin;
+    public StatusFastPath(FastPathHost host) {
+        this.host = host;
     }
 
     @Override
@@ -83,7 +84,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
                 this.readPing(ctx, buf);
             }
         } catch (Exception e) {
-            this.plugin.logFastPathFault(ctx.channel().remoteAddress(), e);
+            this.host.logFastPathFault(ctx.channel().remoteAddress(), e);
             ctx.channel().close();
         } finally {
             if (!handedOff && buf.refCnt() > 0) {
@@ -115,7 +116,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             this.protocol = protocol;
             switchDecoders(ctx);
             this.phase = Phase.REQUEST;
-            this.plugin.onStatusHandshake(ctx.channel().remoteAddress(), protocol);
+            this.host.onStatusHandshake(ctx.channel().remoteAddress(), protocol);
             return Verdict.CONSUMED;
         }
 
@@ -152,9 +153,10 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             // 自建含长度前缀的完整帧（本处理器位于 pipeline 前段，outbound 不经过帧编码器）
             ByteBuf pong = ctx.alloc().directBuffer(10);
             pong.writeByte(9).writeByte(PACKET_PING_REQUEST).writeLong(time);
-            this.writeResponse(ctx, pong);
-            ctx.channel().close();
-        } else if (packetId == PACKET_STATUS_REQUEST && this.plugin.allowImproperPings()) {
+            // 与原生代理一致：写完 pong 后再关闭。直接在 flush 后 close 会在出站缓冲
+            // 尚未完全写出时丢弃 pong（连接关闭会 failFlushed 掉待发数据）
+            this.writeResponse(ctx, pong, true);
+        } else if (packetId == PACKET_STATUS_REQUEST && this.host.allowImproperPings()) {
             // 宽松模式：重复的状态请求也响应（开放空 ping 滥用面，不建议开启）
             this.respondStatus(ctx);
         } else {
@@ -163,32 +165,38 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
     }
 
     private void respondStatus(ChannelHandlerContext ctx) {
-        ByteBuf response = this.plugin.selectResponse(this.protocol);
+        ByteBuf response = this.host.selectResponse(this.protocol);
         if (response == null) {
             // 插件未就绪或配置重载的瞬间窗口，直接结束连接即可
             ctx.channel().close();
             return;
         }
-        this.writeResponse(ctx, response);
+        this.writeResponse(ctx, response, false);
     }
 
-    private void writeResponse(ChannelHandlerContext ctx, ByteBuf msg) {
-        if (this.plugin.directWrite()) {
+    private void writeResponse(ChannelHandlerContext ctx, ByteBuf msg, boolean closeAfterWrite) {
+        // 关闭动作挂在写完成的 promise 上：写失败时同样会关闭（由 outbound 缓冲释放消息）
+        ChannelPromise promise = closeAfterWrite
+                ? ctx.channel().newPromise().addListener(ChannelFutureListener.CLOSE)
+                : ctx.voidPromise();
+        if (this.host.directWrite()) {
             ChannelOutboundBuffer outbound = ctx.channel().unsafe().outboundBuffer();
             if (outbound == null) {
+                // 连接已不可写（正在关闭）：释放帧并确保连接被回收
                 msg.release();
+                ctx.channel().close();
                 return;
             }
-            outbound.addMessage(msg, msg.readableBytes(), ctx.voidPromise());
+            outbound.addMessage(msg, msg.readableBytes(), promise);
             ctx.channel().flush();
         } else {
             // 走标准写出路径（本处理器向 head 方向传播，帧编码器不在路径上，帧必须自带长度前缀）
-            ctx.writeAndFlush(msg, ctx.voidPromise());
+            ctx.writeAndFlush(msg, promise);
         }
     }
 
     private void rejectImproper(ChannelHandlerContext ctx, String detail) {
-        this.plugin.logImproperPing(ctx.channel().remoteAddress(), detail);
+        this.host.logImproperPing(ctx.channel().remoteAddress(), detail);
         ctx.channel().close();
     }
 
