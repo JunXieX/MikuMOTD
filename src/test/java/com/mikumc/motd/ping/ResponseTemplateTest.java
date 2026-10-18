@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -152,7 +153,33 @@ class ResponseTemplateTest {
         try {
             readFrameJson(template.acquire(773));
             String next = readFrameJson(template.acquire(758));
-            assertTrue(next.contains("\"protocol\":      758"), "异协议 ping 应重锚协议号：" + next);
+            assertTrue(next.contains("\"protocol\":      758"), "异协议 ping 应使用自己的协议号：" + next);
+        } finally {
+            template.dispose();
+        }
+    }
+
+    /**
+     * 不同位数的协议号必须互不干扰：共享帧上原地覆写会交错出「数字中间夹空格」的字节，
+     * 那是非法 JSON；每协议号独立帧则不会。
+     */
+    @Test
+    void differingWidthProtocolsDoNotCorruptEachOther() {
+        ResponseTemplate template = ResponseTemplate.compile(
+                "{\"text\":\"d\"}", "v", null, 0, 0, 1, List.of());
+        try {
+            String modern = readFrameJson(template.acquire(773));
+            String legacy = readFrameJson(template.acquire(47));
+            String modernAgain = readFrameJson(template.acquire(773));
+            assertTrue(modern.contains("\"protocol\":      773"), "现代协议：" + modern);
+            assertTrue(legacy.contains("\"protocol\":       47"), "旧协议：" + legacy);
+            assertTrue(modernAgain.contains("\"protocol\":      773"), "现代协议再次命中：" + modernAgain);
+            // 数字槽内不允许出现空格（除前导补位）
+            for (String json : List.of(modern, legacy, modernAgain)) {
+                int at = json.indexOf("\"protocol\":") + "\"protocol\":".length();
+                String slot = json.substring(at, at + 9);
+                assertTrue(slot.trim().matches("\\d+"), "协议槽必须是纯数字：" + slot);
+            }
         } finally {
             template.dispose();
         }
@@ -207,38 +234,17 @@ class ResponseTemplateTest {
         assertEquals(0, held.refCnt(), "释放后切片引用计数归零");
     }
 
-    /** 并发「刷新 + 高频取帧」不得抛异常，且每帧都能被完整解析。 */
+    /** 并发「刷新 + 多协议号高频取帧」不得抛异常，每帧都必须是完整合法的 JSON。 */
     @Test
     void concurrentUpdateAndAcquireStaysConsistent() throws Exception {
         ResponseTemplate template = ResponseTemplate.compile(
                 "{\"text\":\"并发😀\"}", "MikuMOTD", null, 0, 0, 1, List.of());
         AtomicBoolean failed = new AtomicBoolean();
+        AtomicReference<String> firstFailure = new AtomicReference<>();
         CountDownLatch done = new CountDownLatch(3);
-        Runnable reader = () -> {
-            try {
-                for (int i = 0; i < 20_000; i++) {
-                    ByteBuf frame = template.acquire(773);
-                    if (frame == null) {
-                        continue;
-                    }
-                    try {
-                        String json = readFrameJson(frame);
-                        if (!json.contains("\"protocol\":      773")) {
-                            failed.set(true);
-                            return;
-                        }
-                    } finally {
-                        frame.release();
-                    }
-                }
-            } catch (Throwable t) {
-                failed.set(true);
-            } finally {
-                done.countDown();
-            }
-        };
-        Thread a = new Thread(reader);
-        Thread b = new Thread(reader);
+        // 两个读线程分别用不同位数的协议号，正是共享槽位会撕裂的组合
+        Runnable reader = protocolReader(template, 773, failed, firstFailure, done);
+        Runnable reader2 = protocolReader(template, 47, failed, firstFailure, done);
         Thread writer = new Thread(() -> {
             try {
                 for (int i = 0; i < 2_000; i++) {
@@ -251,12 +257,44 @@ class ResponseTemplateTest {
                 done.countDown();
             }
         });
-        a.start();
-        b.start();
+        new Thread(reader).start();
+        new Thread(reader2).start();
         writer.start();
         assertTrue(done.await(60, TimeUnit.SECONDS), "并发测试未在限时内完成");
         template.dispose();
-        assertTrue(!failed.get(), "并发读写不应产生异常或错位");
+        assertTrue(!failed.get(), "并发读写不应产生异常或错位：" + firstFailure.get());
+    }
+
+    private static Runnable protocolReader(ResponseTemplate template, int protocol,
+                                           AtomicBoolean failed, AtomicReference<String> firstFailure,
+                                           CountDownLatch done) {
+        return () -> {
+            String expected = "\"protocol\":" + " ".repeat(9 - Integer.toString(protocol).length())
+                    + protocol;
+            try {
+                for (int i = 0; i < 20_000; i++) {
+                    ByteBuf frame = template.acquire(protocol);
+                    if (frame == null) {
+                        continue;
+                    }
+                    try {
+                        String json = readFrameJson(frame);
+                        if (!json.contains(expected)) {
+                            failed.set(true);
+                            firstFailure.compareAndSet(null, "期望 " + expected + " 实得 " + json);
+                            return;
+                        }
+                    } finally {
+                        frame.release();
+                    }
+                }
+            } catch (Throwable t) {
+                failed.set(true);
+                firstFailure.compareAndSet(null, t.toString());
+            } finally {
+                done.countDown();
+            }
+        };
     }
 
     @Test

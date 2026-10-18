@@ -7,6 +7,7 @@ import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 
 /**
@@ -16,23 +17,29 @@ import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
  * 在线/最大人数与真实玩家列表内嵌帧内，人数或名单变化时整体重建（指纹相同则跳过）。
  * ping 路径上只做一次零拷贝切片（retainedDuplicate），没有任何解码、序列化与字符串操作。</p>
  *
- * <p>协议号槽位与人数槽位同一语义：首个客户端的协议被原位锚定进共享帧，
- * 之后同协议 ping 零拷贝命中，异协议 ping 一次 9 字节覆写（瞬时撕裂仅影响显示，可接受）。</p>
+ * <p>协议号不写进共享帧：每个协议号首次出现时由模板帧复制出一份专属帧并缓存，
+ * 之后同协议 ping 依旧零拷贝命中。若改为「共享帧上原地覆写协议号」，不同位数
+ * 的协议号（如 47 与 773）并发时会把字节交错成「数字中间夹空格」，产生非法 JSON。</p>
  *
  * <p>线程模型：构造与 {@link #dispose} 在配置线程；{@link #update} 在调度线程（低频）；
- * {@link #acquire} 在连接的事件循环线程（高频）。帧字节、协议槽偏移与列表快照作为
- * 单个 {@link Snapshot} 一次性发布，读侧因此永远不会把「旧帧」与「新偏移」组合起来，
- * 刷新期间的错位写入（会写坏 JSON 甚至越界）在结构上不可能发生。</p>
+ * {@link #acquire} 在连接的事件循环线程（高频）。帧字节、槽位偏移与列表快照作为
+ * 单个 {@link Snapshot} 一次性发布，读侧因此不会把「旧帧」与「新偏移」组合起来。</p>
  *
- * <p>快照换代（{@link #update}）会释放旧帧，因此 {@link #acquire} 采用「先抢引用、再写协议槽」
- * 的顺序：抢占失败即说明本代快照刚被淘汰，按「未就绪」返回；抢占成功后帧已被本线程持有，
- * 写协议槽绝不可能落到已回收的内存上。热路径因此保持无锁。</p>
+ * <p>快照换代（{@link #update}）会释放旧帧，因此 {@link #acquire} 采用「先抢引用」的顺序：
+ * 抢占失败即说明本代快照刚被淘汰，此时重读当前快照重试。热路径保持无锁。</p>
  */
 public final class ResponseTemplate {
 
     private static final GsonComponentSerializer GSON = GsonComponentSerializer.gson();
     private static final int COUNT_WIDTH = 8;
     private static final int PROTOCOL_WIDTH = 9;
+    /**
+     * 每代快照的协议号帧槽位数（必须是 2 的幂，按 {@code protocol & mask} 定位）。
+     * 实际同时出现的客户端协议版本通常只有个位数，16 个槽位足够；
+     * 槽位耗尽时退化为「不缓存」，每次 ping 复制一次模板帧，只影响性能不影响正确性。
+     */
+    private static final int PROTOCOL_SLOTS = 16;
+    private static final int PROTOCOL_MASK = PROTOCOL_SLOTS - 1;
     /** 客户端悬停列表最多展示的玩家行数（与原生代理一致）。 */
     public static final int MAX_SAMPLE_ROWS = 12;
 
@@ -41,31 +48,42 @@ public final class ResponseTemplate {
     }
 
     /**
-     * 不可变共享帧快照。帧字节与其内部槽位偏移必须同源发布，
-     * 否则刷新期间「旧帧 + 新偏移」会让协议号被写到 JSON 的任意位置。
+     * 不可变共享帧快照。帧字节、槽位偏移与列表快照必须同源发布，
+     * 否则刷新期间「旧帧 + 新偏移」会让数字被写到 JSON 的任意位置。
      */
     private static final class Snapshot {
 
-        final ByteBuf frame;
+        /** 模板帧：协议槽为占位值，仅用于复制出各协议号的专属帧。 */
+        final ByteBuf template;
+        /** 协议槽在帧内的绝对字节偏移；人数/名单变化会改变布局，故必须随快照一起发布。 */
         final int protocolOffset;
         final int online;
         final int max;
         final List<SampleEntry> sample;
         final long fingerprint;
-        /** 帧内协议槽当前锚定值；-1 表示尚未锚定。 */
-        volatile int anchoredProtocol = -1;
+        /**
+         * 协议号帧缓存：按 {@code protocol & PROTOCOL_MASK} 直接下标，避免热路径上的
+         * {@code Integer} 装箱与哈希。槽位被别的协议号占用时按「未命中」处理，
+         * 该次 ping 使用临时帧（不影响正确性）。
+         */
+        final AtomicReferenceArray<ProtocolSlot> frames =
+                new AtomicReferenceArray<>(PROTOCOL_SLOTS);
         /** 事件模式兜底的 ServerPing，首次取用时才构建（快速路径下永不构建）。 */
         volatile ServerPing compat;
 
-        Snapshot(ByteBuf frame, int protocolOffset, int online, int max,
+        Snapshot(ByteBuf template, int protocolOffset, int online, int max,
                  List<SampleEntry> sample, long fingerprint) {
-            this.frame = frame;
+            this.template = template;
             this.protocolOffset = protocolOffset;
             this.online = online;
             this.max = max;
             this.sample = sample;
             this.fingerprint = fingerprint;
         }
+    }
+
+    /** 一个协议号槽位：协议号与其专属帧成对发布（不可变，便于无锁读取）。 */
+    private record ProtocolSlot(int protocol, ByteBuf frame) {
     }
 
     private final String descriptionJson;
@@ -89,7 +107,7 @@ public final class ResponseTemplate {
     /**
      * @param descriptionJson     MiniMessage 反序列化后经 Gson 序列化的描述 JSON 子树
      * @param faviconUrl          图标 data URL，无图标为 null
-     * @param placeholderProtocol 协议槽初始值（首个客户端 ping 后被真实协议锚定）
+     * @param placeholderProtocol 协议槽占位值（真正的协议号在 {@link #acquire} 时按客户端填入）
      */
     public static ResponseTemplate compile(String descriptionJson, String versionName,
                                            String faviconUrl, int placeholderProtocol,
@@ -100,6 +118,14 @@ public final class ResponseTemplate {
         return template;
     }
 
+    /** 渲染并封装出一代快照。 */
+    private Snapshot build(int online, int max, List<SampleEntry> rows) {
+        Rendered rendered = renderFrame(this.descriptionJson, this.versionName, this.faviconUrl,
+                this.placeholderProtocol, online, max, rows);
+        return new Snapshot(rendered.frame, rendered.protocolOffset, online, max, rows,
+                fingerprint(online, max, rows));
+    }
+
     /**
      * 取一条可直接写出的完整响应帧（自带 VarInt 长度前缀）。
      * 调用方写出后必须释放（引用计数已加一）。模板已销毁时返回 null。
@@ -107,35 +133,65 @@ public final class ResponseTemplate {
      * <p>出站管线不会经过帧编码器（处理器挂在 pipeline 前段，outbound 向 head 传播），
      * 因此无论直写还是走 writeAndFlush，都必须使用完整帧。</p>
      *
-     * <p>顺序至关重要：先 {@code retainedDuplicate()} 抢占引用，再写协议槽。
-     * 若先写后抢引用，刷新换代就可能在我们写入的瞬间释放该帧，造成向已回收内存写入。
-     * 引用计数的自增是 CAS 语义：帧一旦被换代释放（计数归零）就必定抢引用失败，
-     * 此时立刻重读当前快照重试。抢占成功后帧由本线程持有，写协议槽绝不可能越界。</p>
-     *
-     * <p>热路径无锁：常态下只有一次 volatile 读 + 一次引用计数自增。
-     * 仅当恰逢刷新换代（最快 100ms 一次）才多走一次重试，因此 ping 不会因此被丢弃。</p>
+     * <p>{@link #frameFor} 在返回前已把引用加一，调用方拿到的句柄必然存活。
+     * 若恰逢换代导致这一代取不到帧，则重读最新快照再取。刷新间隔最短 100ms，
+     * 连续多次都恰好撞上换代的概率可忽略；这里给 4 次机会以覆盖极端并发场景。</p>
      */
     public ByteBuf acquire(int protocol) {
-        for (int attempt = 0; attempt < 2; attempt++) {
+        for (int attempt = 0; attempt < 4; attempt++) {
             Snapshot snap = this.snapshot;
             if (snap == null) {
                 // 已销毁（重载/关服）：按「未就绪」处理，由调用方关闭连接
                 return null;
             }
-            ByteBuf frame;
-            try {
-                frame = snap.frame.retainedDuplicate();
-            } catch (RuntimeException e) {
-                // 本代快照刚被换代释放：重读当前快照（换代最快 100ms 一次，两次连续失败不可能发生）
-                continue;
+            ByteBuf frame = this.frameFor(snap, protocol);
+            if (frame != null) {
+                return frame;
             }
-            if (protocol != snap.anchoredProtocol) {
-                writePaddedInt(frame, snap.protocolOffset, PROTOCOL_WIDTH, protocol);
-                snap.anchoredProtocol = protocol;
-            }
-            return frame;
         }
         return null;
+    }
+
+    /**
+     * 取该协议号的帧，返回值为已 retain 的独立副本（调用方负责释放）。
+     *
+     * <p>未命中时新建专属帧并写入槽位，同时在锁内完成 retain 再返回：
+     * 这样即使紧接着发生快照换代，本线程手上的引用也不会被回收。
+     * 槽位被别的协议号占用时归还快照那一份引用后替换（槽位数远大于实际
+     * 并存的客户端版本数，替换仅发生在极端混杂版本场景）。</p>
+     *
+     * @return null 表示该快照已被换代
+     */
+    private ByteBuf frameFor(Snapshot snap, int protocol) {
+        int slot = protocol & PROTOCOL_MASK;
+        ProtocolSlot cached = snap.frames.get(slot);
+        if (cached != null && cached.protocol() == protocol) {
+            try {
+                return cached.frame().retainedDuplicate();
+            } catch (RuntimeException e) {
+                // 本代快照刚被释放：交由调用方按「未就绪」处理
+                return null;
+            }
+        }
+        synchronized (this.lifecycle) {
+            if (this.snapshot != snap) {
+                return null;
+            }
+            ProtocolSlot existing = snap.frames.get(slot);
+            if (existing != null && existing.protocol() == protocol) {
+                return existing.frame().retainedDuplicate();
+            }
+            ByteBuf fresh = snap.template.copy();
+            // 协议槽为该帧私有内存：此处的写入不与任何其它 ping 共享。
+            // 偏移取自本代快照——人数/名单变化会改变帧布局，绝不能沿用模板级常量。
+            writePaddedInt(fresh, snap.protocolOffset, PROTOCOL_WIDTH, protocol);
+            snap.frames.set(slot, new ProtocolSlot(protocol, fresh));
+            if (existing != null) {
+                // 只归还快照那一份引用（仍被读方持有的副本不受影响）
+                existing.frame().release();
+            }
+            return fresh.retainedDuplicate();
+        }
     }
 
     /** 事件模式兜底用的 ServerPing（快速路径不可用时的降级路径）。 */
@@ -146,7 +202,7 @@ public final class ResponseTemplate {
         }
         ServerPing local = snap.compat;
         if (local == null) {
-            local = this.buildCompat(snap);
+            local = buildCompat(snap);
             snap.compat = local;
         }
         return local;
@@ -165,24 +221,20 @@ public final class ResponseTemplate {
             // 指纹未变，或已销毁（重载/关服竞态）：无需重建
             return;
         }
-        Snapshot fresh = this.build(online, max, rows);
+        Rendered rendered = renderFrame(this.descriptionJson, this.versionName, this.faviconUrl,
+                this.placeholderProtocol, online, max, rows);
+        Snapshot fresh = new Snapshot(rendered.frame, rendered.protocolOffset, online, max, rows,
+                fingerprint);
         synchronized (this.lifecycle) {
             Snapshot latest = this.snapshot;
             if (latest == null || latest.fingerprint == fingerprint) {
                 // 期间已换代或已销毁：丢弃本次渲染结果，避免泄漏
-                releaseFrame(fresh.frame);
+                releaseSnapshot(fresh);
                 return;
             }
             this.snapshot = fresh;
-            releaseFrame(latest.frame);
+            releaseSnapshot(latest);
         }
-    }
-
-    /** 构造一条快照；rows 必须是不可变列表。 */
-    private Snapshot build(int online, int max, List<SampleEntry> rows) {
-        Rendered rendered = this.renderFrame(online, max, rows);
-        return new Snapshot(rendered.frame, rendered.protocolOffset, online, max, rows,
-                fingerprint(online, max, rows));
     }
 
     private static long fingerprint(int online, int max, List<SampleEntry> sample) {
@@ -194,8 +246,10 @@ public final class ResponseTemplate {
         return hash;
     }
 
-    private Rendered renderFrame(int online, int max, List<SampleEntry> sample) {
-        StringBuilder sb = new StringBuilder(1024 + this.descriptionJson.length());
+    private static Rendered renderFrame(String descriptionJson, String versionName,
+                                        String faviconUrl, int placeholderProtocol,
+                                        int online, int max, List<SampleEntry> sample) {
+        StringBuilder sb = new StringBuilder(1024 + descriptionJson.length());
         sb.append("{\"players\":{\"online\":");
         int onlineAt = sb.length();
         sb.append("        ");
@@ -214,16 +268,16 @@ public final class ResponseTemplate {
         sb.append("]},\"version\":{\"protocol\":");
         int protocolAt = sb.length();
         sb.append("         ");
-        sb.append(",\"name\":\"").append(escapeJson(this.versionName)).append("\"},\"description\":")
-                .append(this.descriptionJson);
-        if (this.faviconUrl != null) {
-            sb.append(",\"favicon\":\"").append(this.faviconUrl).append('"');
+        sb.append(",\"name\":\"").append(escapeJson(versionName)).append("\"},\"description\":")
+                .append(descriptionJson);
+        if (faviconUrl != null) {
+            sb.append(",\"favicon\":\"").append(faviconUrl).append('"');
         }
         sb.append('}');
 
         writeAsciiNumber(sb, onlineAt, COUNT_WIDTH, online);
         writeAsciiNumber(sb, maxAt, COUNT_WIDTH, max);
-        writeAsciiNumber(sb, protocolAt, PROTOCOL_WIDTH, this.placeholderProtocol);
+        writeAsciiNumber(sb, protocolAt, PROTOCOL_WIDTH, placeholderProtocol);
         return toFrame(sb.toString(), protocolAt);
     }
 
@@ -376,8 +430,16 @@ public final class ResponseTemplate {
         }
     }
 
-    private static void releaseFrame(ByteBuf frame) {
-        frame.release();
+    /** 释放一整套快照帧（模板 + 各协议号副本）。 */
+    private static void releaseSnapshot(Snapshot snap) {
+        snap.template.release();
+        for (int i = 0; i < PROTOCOL_SLOTS; i++) {
+            ProtocolSlot slot = snap.frames.get(i);
+            if (slot != null) {
+                slot.frame().release();
+                snap.frames.set(i, null);
+            }
+        }
     }
 
     /** 销毁模板：置空当前快照并释放其帧；重复调用为空操作。 */
@@ -388,7 +450,7 @@ public final class ResponseTemplate {
             this.snapshot = null;
         }
         if (current != null) {
-            releaseFrame(current.frame);
+            releaseSnapshot(current);
         }
     }
 
