@@ -27,6 +27,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: plugin-jar
+          retention-days: 1
           path: build/libs/*.jar
           if-no-files-found: error
       - name: Resolve release info
