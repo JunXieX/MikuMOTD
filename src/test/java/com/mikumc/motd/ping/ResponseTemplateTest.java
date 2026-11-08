@@ -1,6 +1,7 @@
 package com.mikumc.motd.ping;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -75,25 +76,33 @@ class ResponseTemplateTest {
     @Test
     void writePaddedIntRightAlignsWithSpaceFill() {
         ByteBuf buf = Unpooled.directBuffer(8);
-        for (int i = 0; i < 8; i++) {
-            buf.writeByte(' ');
+        try {
+            for (int i = 0; i < 8; i++) {
+                buf.writeByte(' ');
+            }
+            ResponseTemplate.writePaddedInt(buf, 0, 8, 1000);
+            byte[] out = new byte[8];
+            buf.readBytes(out);
+            assertEquals("    1000", new String(out, StandardCharsets.US_ASCII));
+        } finally {
+            buf.release();
         }
-        ResponseTemplate.writePaddedInt(buf, 0, 8, 1000);
-        byte[] out = new byte[8];
-        buf.readBytes(out);
-        assertEquals("    1000", new String(out, StandardCharsets.US_ASCII));
     }
 
     @Test
     void writePaddedIntClampsToWidth() {
         ByteBuf buf = Unpooled.directBuffer(8);
-        for (int i = 0; i < 8; i++) {
-            buf.writeByte(' ');
+        try {
+            for (int i = 0; i < 8; i++) {
+                buf.writeByte(' ');
+            }
+            ResponseTemplate.writePaddedInt(buf, 0, 8, Integer.MAX_VALUE);
+            byte[] out = new byte[8];
+            buf.readBytes(out);
+            assertEquals("99999999", new String(out, StandardCharsets.US_ASCII));
+        } finally {
+            buf.release();
         }
-        ResponseTemplate.writePaddedInt(buf, 0, 8, Integer.MAX_VALUE);
-        byte[] out = new byte[8];
-        buf.readBytes(out);
-        assertEquals("99999999", new String(out, StandardCharsets.US_ASCII));
     }
 
     @Test
@@ -118,7 +127,7 @@ class ResponseTemplateTest {
                 0, 1,
                 List.of(new SampleEntry(UUID.randomUUID(), "玩家甲")));
         try {
-            String json = readFrameJson(template.acquire(773));
+            String json = frameJson(template, 773);
             assertTrue(json.contains("\"online\":       0,"), "初始在线人数：" + json);
             assertTrue(json.contains("\"max\":       1,"), "初始最大人数：" + json);
             assertTrue(json.contains("\"protocol\":      773"), "协议号锚定：" + json);
@@ -136,7 +145,7 @@ class ResponseTemplateTest {
         try {
             template.update(12345, 6789, List.of(
                     new SampleEntry(UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5"), "Notch")));
-            String json = readFrameJson(template.acquire(773));
+            String json = frameJson(template, 773);
             assertTrue(json.contains("\"online\":   12345,"), "覆写后的在线人数：" + json);
             assertTrue(json.contains("\"max\":    6789,"), "覆写后的最大人数：" + json);
             assertTrue(json.contains("Notch"), "覆写后的玩家列表：" + json);
@@ -151,8 +160,8 @@ class ResponseTemplateTest {
         ResponseTemplate template = ResponseTemplate.compile(
                 "{\"text\":\"d\"}", "v", null, 0, 0, 1, List.of());
         try {
-            readFrameJson(template.acquire(773));
-            String next = readFrameJson(template.acquire(758));
+            frameJson(template, 773);
+            String next = frameJson(template, 758);
             assertTrue(next.contains("\"protocol\":      758"), "异协议 ping 应使用自己的协议号：" + next);
         } finally {
             template.dispose();
@@ -168,9 +177,9 @@ class ResponseTemplateTest {
         ResponseTemplate template = ResponseTemplate.compile(
                 "{\"text\":\"d\"}", "v", null, 0, 0, 1, List.of());
         try {
-            String modern = readFrameJson(template.acquire(773));
-            String legacy = readFrameJson(template.acquire(47));
-            String modernAgain = readFrameJson(template.acquire(773));
+            String modern = frameJson(template, 773);
+            String legacy = frameJson(template, 47);
+            String modernAgain = frameJson(template, 773);
             assertTrue(modern.contains("\"protocol\":      773"), "现代协议：" + modern);
             assertTrue(legacy.contains("\"protocol\":       47"), "旧协议：" + legacy);
             assertTrue(modernAgain.contains("\"protocol\":      773"), "现代协议再次命中：" + modernAgain);
@@ -192,7 +201,7 @@ class ResponseTemplateTest {
                 "{\"text\":\"x\"}", "v", null, 0, 0, 1, List.of());
         try {
             template.update(9_999_999, 9_999_999, List.of());
-            String json = readFrameJson(template.acquire(770));
+            String json = frameJson(template, 770);
             assertTrue(json.contains("\"online\": 9999999,"), "在线人数：" + json);
             assertTrue(json.contains("\"max\": 9999999,"), "最大人数：" + json);
             assertTrue(json.contains("\"protocol\":      770"), "协议号：" + json);
@@ -243,8 +252,8 @@ class ResponseTemplateTest {
         AtomicReference<String> firstFailure = new AtomicReference<>();
         CountDownLatch done = new CountDownLatch(3);
         // 两个读线程分别用不同位数的协议号，正是共享槽位会撕裂的组合
-        Runnable reader = protocolReader(template, 773, failed, firstFailure, done);
-        Runnable reader2 = protocolReader(template, 47, failed, firstFailure, done);
+        Thread reader = new Thread(protocolReader(template, 773, failed, firstFailure, done));
+        Thread reader2 = new Thread(protocolReader(template, 47, failed, firstFailure, done));
         Thread writer = new Thread(() -> {
             try {
                 for (int i = 0; i < 2_000; i++) {
@@ -257,12 +266,19 @@ class ResponseTemplateTest {
                 done.countDown();
             }
         });
-        new Thread(reader).start();
-        new Thread(reader2).start();
-        writer.start();
-        assertTrue(done.await(60, TimeUnit.SECONDS), "并发测试未在限时内完成");
-        template.dispose();
-        assertTrue(!failed.get(), "并发读写不应产生异常或错位：" + firstFailure.get());
+        try {
+            reader.start();
+            reader2.start();
+            writer.start();
+            assertTrue(done.await(60, TimeUnit.SECONDS), "并发测试未在限时内完成");
+        } finally {
+            template.dispose();
+            long joinMillis = TimeUnit.SECONDS.toMillis(10);
+            reader.join(joinMillis);
+            reader2.join(joinMillis);
+            writer.join(joinMillis);
+        }
+        assertFalse(failed.get(), "并发读写不应产生异常或错位：" + firstFailure.get());
     }
 
     private static Runnable protocolReader(ResponseTemplate template, int protocol,
@@ -313,6 +329,17 @@ class ResponseTemplateTest {
             assertEquals("MikuMOTD", ping.getVersion().getName());
         } finally {
             template.dispose();
+        }
+    }
+
+    /** 取一帧并读出 JSON；帧的引用计数由本方法自己归还。 */
+    private static String frameJson(ResponseTemplate template, int protocol) {
+        ByteBuf frame = template.acquire(protocol);
+        assertNotNull(frame, "应能取到协议 " + protocol + " 的帧");
+        try {
+            return readFrameJson(frame);
+        } finally {
+            frame.release();
         }
     }
 

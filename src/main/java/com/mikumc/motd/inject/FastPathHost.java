@@ -23,9 +23,6 @@ public interface FastPathHost {
     /** 取一条当前协议号对应的完整响应帧（含长度前缀，引用计数已加一）。未就绪返回 null。 */
     ByteBuf selectResponse(int protocol);
 
-    /** 是否直接写入连接出站缓冲（跳过 Netty 标准 write 路径）。 */
-    boolean directWrite();
-
     /** 是否允许非标准 ping 顺序（重复状态请求）。 */
     boolean allowImproperPings();
 

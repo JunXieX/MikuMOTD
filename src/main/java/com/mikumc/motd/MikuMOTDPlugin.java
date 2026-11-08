@@ -10,7 +10,6 @@ import com.mikumc.motd.ping.ResponseTemplate;
 import com.mikumc.motd.util.Favicon;
 import com.mikumc.motd.util.VanishSupport;
 import com.velocitypowered.api.command.CommandManager;
-import com.velocitypowered.api.command.CommandMeta;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
@@ -29,6 +28,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
@@ -58,9 +58,13 @@ public final class MikuMOTDPlugin implements FastPathHost {
     private static final long FAULT_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
     private static final GsonComponentSerializer GSON = GsonComponentSerializer.gson();
 
+    /**
+     * 数据目录固定为 plugins/MikuMOTD：{@code @DataDirectory} 按插件 id（小写 mikumotd）
+     * 解析目录名，在大小写敏感的 Linux 上会另起 plugins/mikumotd，等于让既有用户丢配置。
+     */
+    private final Path dataDirectory = Path.of("plugins", "MikuMOTD");
     private final ProxyServer proxy;
     private final Logger logger;
-    private final Path dataDirectory = Path.of("plugins", "MikuMOTD");
     private final AtomicLong lastFaultLog = new AtomicLong();
     private final Object reloadLock = new Object();
 
@@ -88,40 +92,40 @@ public final class MikuMOTDPlugin implements FastPathHost {
 
     @Subscribe
     public void onInitialize(ProxyInitializeEvent event) {
+        // 命令与兜底监听器先落地：它们是配置坏掉时唯一的恢复入口与保底响应路径，
+        // 不能排在注入（可能抛 LinkageError）之后
+        CommandManager commands = this.proxy.getCommandManager();
+        commands.register(commands.metaBuilder("mikumotd").plugin(this).build(), new MikuCommand(this));
+        this.registerCompat();
+
         try {
             this.reload();
         } catch (Exception e) {
-            // 配置非法等也走这里；保底注册事件模式与命令，让 /mikumotd reload 可用
+            // 配置非法等也走这里；保底保留事件模式与命令，让 /mikumotd reload 可用
             this.logger.error("配置加载失败，修正 plugins/MikuMOTD/config.conf 后执行 /mikumotd reload", e);
         }
-        // 兜底监听器始终注册：快速路径自行消费的连接不会触发 ProxyPingEvent，
-        // 因此它不会形成第二条响应路径；真正受益的是快速路径覆盖不到的那部分连接
-        // ——legacy ping（0xFE，旧客户端与部分探活工具）以及个别连接挂载失败的情况，
-        // 它们同样应显示本插件配置的 MOTD，而不是回落成代理原生 MOTD。
-        this.registerCompat();
         // Hook 无条件安装（即使当前是事件模式）：连接初始化器在端口绑定时就被固化进
-        // ServerBootstrap，之后再装对已监听端口无效。Hook 内部按当前配置决定每条连接
-        // 是否挂载快速路径，因此装一次即可让 compat-mode 的热切换双向生效。
+        // ServerBootstrap，之后再装对已监听端口无效。Hook 内部按当前配置决定每条连接是否挂载，
+        // 因此装一次即可让 compat-mode 的热切换双向生效
         this.installHook();
         // 配置非法（runtime 为空）时不启用快速路径：事件模式下 ping 交还原生代理，
         // 比快速路径「无帧可取 → 关连接」更合理
         RuntimeState current = this.runtime;
         this.applyMode(current != null && !current.config().compatMode());
         this.logger.info("当前响应模式：{}", this.fastPath ? "快速路径（字节级）" : "事件模式（兜底）");
-
-        CommandManager commands = this.proxy.getCommandManager();
-        CommandMeta meta = commands.metaBuilder("mikumotd")
-                .plugin(this)
-                .build();
-        commands.register(meta, new MikuCommand(this));
     }
 
     private void installHook() {
         if (this.injected) {
             return;
         }
-        if (Injector.inject(this, this.proxy) != null) {
-            this.injected = true;
+        try {
+            if (Injector.inject(this, this.proxy) != null) {
+                this.injected = true;
+            }
+        } catch (LinkageError e) {
+            // Injector 的静态初始化失败会以 NoClassDefFoundError 绕过 inject 内部的 catch
+            this.logger.error("快速路径不可用（代理内部结构不符），保持事件模式", e);
         }
     }
 
@@ -132,9 +136,9 @@ public final class MikuMOTDPlugin implements FastPathHost {
      * 注入本身的失败已由 {@code Injector} 带堆栈记录，此处不再重复告警——
      * 否则在「先 reload、后注入」的调用顺序下会把正常流程误报成失败。</p>
      *
-     * <p>快速路径的挂载点 {@code Hook} 在插件启用时安装一次，之后每条新连接建立时
-     * 读取 {@link #fastPathEnabled()}，因此 compat-mode 的热重载对之后的所有连接
-     * 立即生效，两个方向都有效。兜底监听器常驻，负责覆盖快速路径不会接管的连接。</p>
+     * <p>快速路径的挂载点在插件启用时安装一次，之后每条新连接建立时读取
+     * {@link #fastPathEnabled()}，因此 compat-mode 的热重载对之后的所有连接立即生效，
+     * 两个方向都有效。兜底监听器常驻，负责覆盖快速路径不会接管的连接。</p>
      */
     private void applyMode(boolean wantFastPath) {
         boolean enable = wantFastPath && this.injected;
@@ -194,18 +198,19 @@ public final class MikuMOTDPlugin implements FastPathHost {
                 faviconUrl = Favicon.load(config.logo(), this.dataDirectory);
             } catch (Exception e) {
                 // fail-open：图标缺失/损坏只降级为无图标，不阻断配置加载
-                this.logger.warn("图标加载失败（本次将不含图标）：{}", config.logo(), e);
+                this.reportFaviconFailure(config.logo(), e);
                 faviconUrl = null;
             }
-            Set<UUID> vanished = VanishSupport.vanishedPlayers();
+            // 人数与玩家列表取同一次快照，避免「在线数」与悬停列表条数对不上
+            List<Player> online = this.visiblePlayers();
             ResponseTemplate fresh = ResponseTemplate.compile(
                     descriptionJson,
                     "MikuMOTD",
                     faviconUrl,
                     0,
-                    this.visiblePlayerCount(vanished),
+                    online.size(),
                     this.maxPlayers(config),
-                    this.currentSample(vanished));
+                    sampleOf(online));
 
             RuntimeState previous = this.runtime;
             this.runtime = new RuntimeState(config, fresh);
@@ -224,16 +229,44 @@ public final class MikuMOTDPlugin implements FastPathHost {
         }
     }
 
+    /**
+     * 异步重载：配置解析与图标解码会触发文件 IO 与 AWT 初始化，不能占用命令线程
+     * （玩家命令在连接的事件循环上执行）。结果在调度线程回调；{@code sendMessage}
+     * 最终走 {@code channel.writeAndFlush}，跨线程写是安全的。
+     */
+    public void requestReload(Consumer<Boolean> onResult) {
+        this.proxy.getScheduler().buildTask(this, () -> {
+            boolean ok;
+            try {
+                ok = this.reload();
+            } catch (Exception e) {
+                this.logger.error("配置重载失败", e);
+                ok = false;
+            }
+            onResult.accept(ok);
+        }).schedule();
+    }
+
+    /** 图标加载失败只降级为无图标：预期失败（文件缺失/格式非法）记一行，非预期保留堆栈。 */
+    private void reportFaviconFailure(String logo, Exception cause) {
+        if (cause instanceof IOException) {
+            this.logger.warn("图标加载失败（本次将不含图标）：{}（{}）", logo, cause.toString());
+        } else {
+            this.logger.warn("图标加载失败（本次将不含图标）：{}", logo, cause);
+        }
+    }
+
     private void rescheduleRefreshTask(MikuConfig config) {
         ScheduledTask previous = this.refreshTask;
-        if (previous != null) {
-            previous.cancel();
-        }
+        // 先建新任务再取消旧任务：建任务失败时旧任务仍在跑，不会出现「新配置已生效但人数停更」
         this.refreshTask = this.proxy.getScheduler()
                 .buildTask(this, this::refresh)
                 .delay(config.updateIntervalMs(), TimeUnit.MILLISECONDS)
                 .repeat(config.updateIntervalMs(), TimeUnit.MILLISECONDS)
                 .schedule();
+        if (previous != null) {
+            previous.cancel();
+        }
     }
 
     private void refresh() {
@@ -241,38 +274,28 @@ public final class MikuMOTDPlugin implements FastPathHost {
         if (current == null) {
             return;
         }
-        // 隐身集合每次刷新只查一次，人数与玩家列表共用同一快照
-        Set<UUID> vanished = VanishSupport.vanishedPlayers();
-        current.template().update(
-                this.visiblePlayerCount(vanished),
-                this.maxPlayers(current.config()),
-                this.currentSample(vanished));
+        List<Player> online = this.visiblePlayers();
+        current.template().update(online.size(), this.maxPlayers(current.config()), sampleOf(online));
     }
 
-    /** 人数上限：插件覆盖值优先，0 沿用代理原生 show-max-players。 */
+    /** 人数上限：插件覆盖值优先，0 沿用代理原生 show-max-players（负值按 0 处理）。 */
     private int maxPlayers(MikuConfig config) {
-        if (config == null) {
-            return 0;
-        }
         int override = config.maxPlayers();
-        return override > 0 ? override : this.proxy.getConfiguration().getShowMaxPlayers();
+        return override > 0 ? override : Math.max(0, this.proxy.getConfiguration().getShowMaxPlayers());
     }
 
-    /** 可见在线人数：安装了 MikuVanish 时剔除隐身玩家，否则为总在线数。 */
-    private int visiblePlayerCount(Set<UUID> vanished) {
-        if (vanished.isEmpty()) {
-            return this.proxy.getPlayerCount();
-        }
-        return (int) this.proxy.getAllPlayers().stream()
-                .filter(player -> !vanished.contains(player.getUniqueId()))
-                .count();
-    }
-
-    /** 真实在线玩家快照：剔除隐身玩家，按 UUID 排序（与原生代理同为 12 行上限）。 */
-    private List<ResponseTemplate.SampleEntry> currentSample(Set<UUID> vanished) {
+    /** 可见在线玩家：剔除隐身玩家，按 UUID 排序（与原生代理同为 12 行上限）。人数与列表共用这一份。 */
+    private List<Player> visiblePlayers() {
+        Set<UUID> vanished = VanishSupport.vanishedPlayers();
         List<Player> online = new ArrayList<>(this.proxy.getAllPlayers());
-        online.removeIf(player -> vanished.contains(player.getUniqueId()));
+        if (!vanished.isEmpty()) {
+            online.removeIf(player -> vanished.contains(player.getUniqueId()));
+        }
         online.sort(Comparator.comparing(Player::getUniqueId));
+        return online;
+    }
+
+    private static List<ResponseTemplate.SampleEntry> sampleOf(List<Player> online) {
         int rows = Math.min(online.size(), ResponseTemplate.MAX_SAMPLE_ROWS);
         List<ResponseTemplate.SampleEntry> entries = new ArrayList<>(rows);
         for (int i = 0; i < rows; i++) {
@@ -298,6 +321,7 @@ public final class MikuMOTDPlugin implements FastPathHost {
      * {@link RuntimeState}，取帧会失败；此时重读一次当前状态即可命中新模板，
      * 避免把极窄的竞态窗口暴露成一次连接被断。</p>
      */
+    @Override
     public ByteBuf selectResponse(int protocol) {
         for (int attempt = 0; attempt < 2; attempt++) {
             RuntimeState current = this.runtime;
@@ -319,19 +343,25 @@ public final class MikuMOTDPlugin implements FastPathHost {
     /** 事件模式兜底取当前预构建 ping；未就绪时返回 null（交还原生代理行为）。 */
     public ServerPing statusPing() {
         RuntimeState current = this.runtime;
-        return current == null ? null : current.template().acquireCompat();
+        if (current == null) {
+            return null;
+        }
+        ServerPing ping = current.template().acquireCompat();
+        if (ping != null || this.runtime == current) {
+            return ping;
+        }
+        // 该代模板刚被重载销毁：重读一次新状态，避免这一次 ping 回落成代理原生 MOTD
+        RuntimeState fresh = this.runtime;
+        return fresh == null ? null : fresh.template().acquireCompat();
     }
 
-    public boolean directWrite() {
-        RuntimeState current = this.runtime;
-        return current != null && current.config().directWrite();
-    }
-
+    @Override
     public boolean allowImproperPings() {
         RuntimeState current = this.runtime;
         return current != null && current.config().allowImproperPings();
     }
 
+    @Override
     public void onStatusHandshake(java.net.SocketAddress remote, int protocol) {
         RuntimeState current = this.runtime;
         if (current != null && current.config().logPings()) {
@@ -339,6 +369,7 @@ public final class MikuMOTDPlugin implements FastPathHost {
         }
     }
 
+    @Override
     public void logImproperPing(java.net.SocketAddress remote, String detail) {
         RuntimeState current = this.runtime;
         if (current != null && current.config().logImproperPings()) {
@@ -347,6 +378,7 @@ public final class MikuMOTDPlugin implements FastPathHost {
     }
 
     /** 快速路径内部异常的限速日志（避免被畸形包刷屏）。 */
+    @Override
     public void logFastPathFault(java.net.SocketAddress remote, Throwable cause) {
         long now = System.nanoTime();
         long last = this.lastFaultLog.get();
@@ -366,8 +398,7 @@ public final class MikuMOTDPlugin implements FastPathHost {
                 .append(Component.text(" — ", NamedTextColor.DARK_GRAY))
                 .append(Component.text("模式：" + mode, NamedTextColor.GREEN))
                 .append(Component.text(" ｜ 人数上限：" + this.maxPlayers(current.config()), NamedTextColor.AQUA))
-                .append(Component.text(" ｜ 在线：" + this.visiblePlayerCount(VanishSupport.vanishedPlayers()),
-                        NamedTextColor.AQUA))
+                .append(Component.text(" ｜ 在线：" + this.visiblePlayers().size(), NamedTextColor.AQUA))
                 .append(Component.text(" ｜ 刷新间隔：" + current.config().updateIntervalMs() + "ms",
                         NamedTextColor.GRAY))
                 .build();

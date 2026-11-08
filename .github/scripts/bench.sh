@@ -7,9 +7,6 @@ set -euo pipefail
 DIR=bench-run
 VELOCITY_JAR=$DIR/velocity.jar
 PLUGIN_JAR=$(ls build/libs/MikuMOTD-*.jar)
-RIVAL_JAR=$DIR/MikuFastMOTD-1.0.0.jar
-MIKU130_JAR=$DIR/MikuMOTD-1.3.0.jar
-MIKU140_JAR=$DIR/MikuMOTD-1.4.0.jar
 PORT=25565
 ROUNDS=${BENCH_ROUNDS:-3}
 LATENCY_RUNS=${BENCH_LATENCY_RUNS:-2000}
@@ -22,11 +19,6 @@ ROOT=$PWD
 WORK=$ROOT/$DIR
 mkdir -p "$WORK"
 : > "$RESULTS"
-# 六方对比的第六场景（MikuFastMOTD）使用预构建二进制（bench-deps release 资产）
-curl -sL --retry 3 -o "$WORK/MikuFastMOTD-1.0.0.jar" "https://github.com/JunXieX/MikuMOTD/releases/download/bench-deps-v1/MikuFastMOTD-1.0.0.jar"
-# 版本对比：v1.3.0（功能全）与 v1.4.0（精简）的官方 release 二进制
-curl -sL --retry 3 -o "$WORK/MikuMOTD-1.3.0.jar" "https://github.com/JunXieX/MikuMOTD/releases/download/v1.3.0/MikuMOTD-1.3.0.jar"
-curl -sL --retry 3 -o "$WORK/MikuMOTD-1.4.0.jar" "https://github.com/JunXieX/MikuMOTD/releases/download/v1.4.0/MikuMOTD-1.4.0.jar"
 
 # 代理与压测客户端统一使用工作流指定的 JDK，避免 runner 默认 PATH 上存在旧版本 java
 JCMD="${JAVA_HOME:-}/bin/java"
@@ -34,7 +26,6 @@ if [ ! -x "$JCMD" ]; then
   echo "JAVA_HOME 未指向可用的 JDK: $JAVA_HOME" >&2
   exit 1
 fi
-mkdir -p "$WORK"
 "${JAVA_HOME}/bin/javac" -d "$WORK" bench/MotdBench.java
 
 declare -A SKIPPED
@@ -92,7 +83,8 @@ fi
 make_plugins() {
   local target=$1 mode=$2
   rm -rf "$target"
-  mkdir -p "$target/mikumotd" "$target/fastmotd" "$target/minimotd"
+  # 插件数据目录区分大小写（Linux）：必须与插件读取的 plugins/MikuMOTD 一致
+  mkdir -p "$target/MikuMOTD"
   case $mode in
     bare)
       ;;
@@ -103,7 +95,6 @@ logo="none"
 motd="&aBenchmark MOTD line one"
 max-players=1000
 update-interval-ms=3000
-direct-write=true
 compat-mode=$([ "$mode" = "compat" ] && echo true || echo false)
 CONF
       ;;
@@ -115,52 +106,6 @@ CONF
     minimotd)
       cp "$MINIMOTD_JAR" "$target/"
       ;;
-    rival)
-      # MikuFastMOTD：预构建二进制，使用其自生成默认配置
-      cp "$RIVAL_JAR" "$target/"
-      ;;
-    miku130)
-      # v1.3.0（功能全版本）：1.3.0 时代的配置键，渲染结果与 miku140 对齐
-      cp "$MIKU130_JAR" "$target/"
-      cat > "$target/MikuMOTD/config.conf" <<CONF
-general {
-    update-interval-ms=3000
-    direct-write=true
-    compat-mode=false
-    text-format=LEGACY_AMPERSAND
-    png-quality=-1
-    allow-improper-pings=false
-}
-players {
-    max-count-type=FIXED
-    max-count=1000
-    fake-online-fixed=0
-    fake-online-percent=0
-}
-motd {
-    version-name="Benchmark"
-    descriptions=["&aBenchmark MOTD line one"]
-    favicons=[]
-    player-list=[]
-    player-list-source="static"
-}
-maintenance {
-    enabled=false
-}
-CONF
-      ;;
-    miku140)
-      # v1.4.0（精简版本）：1.4.0 配置键，渲染结果与 miku130 对齐
-      cp "$MIKU140_JAR" "$target/"
-      cat > "$target/MikuMOTD/config.conf" <<CONF
-logo="none"
-motd="<green>Benchmark MOTD line one"
-max-players=1000
-update-interval-ms=3000
-direct-write=true
-compat-mode=false
-CONF
-      ;;
   esac
 }
 
@@ -169,7 +114,6 @@ loaded_marker() {
   case $1 in
     fastmotd) echo "fastmotd" ;;
     minimotd) echo "minimotd" ;;
-    rival) echo "mikufastmotd" ;;
     compat | fast) echo "mikumotd" ;;
     bare) echo "Done" ;;
   esac
@@ -195,6 +139,19 @@ start_proxy() {
         if ! grep -qi "Loaded plugin $(loaded_marker "$mode")" "$log"; then
           echo "插件未加载成功: $mode" >&2
           grep -iE "plugin|error" "$log" | tail -10 >&2 || true
+          return 1
+        fi
+      fi
+      # 快速路径场景必须确认真的走到了字节层：注入失败时插件会静默回退事件模式，
+      # 不校验就会把事件模式的数据当成快速路径写进汇总。
+      # 用响应本身判定（快速路径的帧是定宽补位，数字前有空格；事件模式由 Gson 序列化不带补位），
+      # 这样既不依赖日志语言与编码，也验证的是真实测量路径。
+      if [ "$mode" = "fast" ]; then
+        local probe
+        probe=$("$JCMD" -cp "$WORK" MotdBench 127.0.0.1 "$PORT" 2>/dev/null || true)
+        if ! grep -q '"online":  ' <<< "$probe"; then
+          echo "快速路径未生效（响应不是字节层帧），拒绝以此场景出数" >&2
+          echo "实际响应：$probe" >&2
           return 1
         fi
       fi
@@ -262,9 +219,6 @@ scenario_label() {
   case $1 in
     bare) echo "裸代理（无插件）" ;;
     minimotd) echo "MiniMOTD" ;;
-    rival) echo "MikuFastMOTD" ;;
-    miku130) echo "MikuMOTD v1.3.0" ;;
-    miku140) echo "MikuMOTD v1.4.0" ;;
     fastmotd) echo "FastMOTD" ;;
     compat) echo "MikuMOTD 事件模式" ;;
     fast) echo "MikuMOTD 快速路径" ;;
@@ -274,8 +228,6 @@ scenario_label() {
 SCENARIOS=(bare)
 [ -z "${SKIPPED[minimotd]:-}" ] && SCENARIOS+=(minimotd)
 [ -z "${SKIPPED[fastmotd]:-}" ] && SCENARIOS+=(fastmotd)
-# rival（mikufastmotd）与 miku130/miku140（版本对比）场景的 make_plugins 分支保留，
-# 需要时把对应名字加回下方序列；rival 在 CI 的 Linux 环境下无法运行（静默关闭 ping）
 SCENARIOS+=(compat fast)
 
 echo "== 场景交替测量（共 $ROUNDS 轮）=="
@@ -287,6 +239,8 @@ for round in $(seq 1 "$ROUNDS"); do
     fi
     if ! start_proxy "$scenario" "$scenario"; then
       SCENARIO_FAILED[$scenario]="运行失败"
+      # 启动失败时代理可能已经起来并占着端口，必须收掉，否则后续场景全部连不上
+      stop_proxy "$scenario"
       continue
     fi
     echo "[$scenario 第 $round 轮]"

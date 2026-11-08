@@ -53,7 +53,10 @@ public final class ResponseTemplate {
      */
     private static final class Snapshot {
 
-        /** 模板帧：协议槽为占位值，仅用于复制出各协议号的专属帧。 */
+        /**
+         * 模板帧：协议槽为占位值，仅用于复制出各协议号的专属帧。
+         * readerIndex 恒为 0——模板只被 copy 与 setByte 触碰，任何一次读取都会让后续帧整体前移。
+         */
         final ByteBuf template;
         /** 协议槽在帧内的绝对字节偏移；人数/名单变化会改变布局，故必须随快照一起发布。 */
         final int protocolOffset;
@@ -131,7 +134,7 @@ public final class ResponseTemplate {
      * 调用方写出后必须释放（引用计数已加一）。模板已销毁时返回 null。
      *
      * <p>出站管线不会经过帧编码器（处理器挂在 pipeline 前段，outbound 向 head 传播），
-     * 因此无论直写还是走 writeAndFlush，都必须使用完整帧。</p>
+     * 因此写出时必须使用完整帧。</p>
      *
      * <p>{@link #frameFor} 在返回前已把引用加一，调用方拿到的句柄必然存活。
      * 若恰逢换代导致这一代取不到帧，则重读最新快照再取。刷新间隔最短 100ms，
@@ -285,8 +288,8 @@ public final class ResponseTemplate {
         ServerPing.Builder builder = ServerPing.builder()
                 .version(new ServerPing.Version(this.placeholderProtocol, this.versionName))
                 .description(GSON.deserialize(this.descriptionJson))
-                .onlinePlayers(Math.max(0, snap.online))
-                .maximumPlayers(Math.max(0, snap.max));
+                .onlinePlayers(snap.online)
+                .maximumPlayers(snap.max);
         if (this.faviconUrl != null) {
             builder.favicon(new Favicon(this.faviconUrl));
         }

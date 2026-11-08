@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.mikumc"
-version = "1.9.1"
+version = "1.10.0"
 
 java {
     toolchain {

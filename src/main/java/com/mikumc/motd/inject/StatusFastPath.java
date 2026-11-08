@@ -1,31 +1,26 @@
 package com.mikumc.motd.inject;
 
 import com.velocitypowered.proxy.protocol.StateRegistry;
-import com.velocitypowered.proxy.protocol.netty.MinecraftDecoder;
 import com.velocitypowered.proxy.protocol.netty.MinecraftVarintFrameDecoder;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 
 /**
- * 状态查询的快速路径：挂在帧解码器之后的入站处理器，直接在字节层面
- * 完成「握手 → 状态请求 → 状态响应 → 心跳」的整套交互。
+ * 状态查询的快速路径：挂在帧解码器之后的入站处理器，直接在字节层面完成
+ * 「握手 → 状态请求 → 状态响应 → 心跳」的整套交互。
  *
- * <p>命中状态查询的连接完全不进入 Velocity 的会话处理（无包对象分配、
- * 无事件分发、无 JSON 序列化），响应为预渲染的零拷贝帧切片；
- * 登录/传输握手则原样字节透传给原生管线并自移除，代理行为不受影响。</p>
+ * <p>命中状态查询的连接完全不进入 Velocity 的会话处理（无包对象分配、无事件分发、
+ * 无 JSON 序列化），响应为预渲染的零拷贝帧切片；登录/传输握手则原样字节透传给原生管线并自移除。</p>
  *
- * <p>安全设计：握手与请求各字段均校验长度边界与精确载荷长度（与原生解码器一致），
- * 畸形包直接断开且不产生对象分配；严格模式下乱序 ping 序列一律拒绝，防止空 ping 滥用；
- * 任何异常只影响当前连接（fail-open 面最小化），系统性失败由注入阶段兜底。</p>
+ * <p>校验口径与原生解码器一致：状态请求必须空载、心跳必须恰好 8 字节、握手主机串只按长度跳过
+ * （内容不参与任何逻辑）。畸形包直接断开。</p>
  *
  * <p>缓冲所有权：入站帧解码器以 {@code readRetainedSlice} 交付，引用计数由本处理器承担。
  * 除「交还原生管线」外，所有路径都在 {@link #channelRead} 的 finally 中恰好释放一次；
- * 交接分支在调用 {@code fireChannelRead} 前就置位所有权标记，
- * 因此下游抛异常时也不会被重复释放。</p>
+ * 交接分支在调用 {@code fireChannelRead} 前就置位所有权标记，因此下游抛异常也不会被重复释放。</p>
  */
 public final class StatusFastPath extends ChannelInboundHandlerAdapter {
 
@@ -34,20 +29,18 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
     private static final int PACKET_STATUS_REQUEST = 0x00;
     private static final int PACKET_PING_REQUEST = 0x01;
     private static final int NEXT_STATUS_STATE = 0x01;
-    /** 握手主机名长度上限（防滥用边界，内容不参与任何逻辑）。 */
-    private static final int MAX_HOST_LENGTH = 1024;
     /** Minecraft VarInt 的最长编码字节数。 */
     private static final int MAX_VARINT_BYTES = 5;
+
+    private final FastPathHost host;
+    private Phase phase = Phase.HANDSHAKE;
+    private int protocol;
 
     /** 入站包的处置结论：交还原生管线，或由快速路径自行消费。 */
     private enum Verdict {
         HANDOFF,
         CONSUMED
     }
-
-    private final FastPathHost host;
-    private Phase phase = Phase.HANDSHAKE;
-    private int protocol;
 
     private enum Phase {
         HANDSHAKE,
@@ -62,7 +55,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (!(msg instanceof ByteBuf buf)) {
-            // 旧版客户端的 ping 由更前方的专用解码器处理，原样透传
+            // 旧版客户端的 ping 包与 HAProxy 头由其它处理器产出，原样透传
             ctx.fireChannelRead(msg);
             return;
         }
@@ -72,7 +65,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         try {
             if (this.phase == Phase.HANDSHAKE) {
                 if (this.readHandshake(ctx, buf) == Verdict.HANDOFF) {
-                    // 先置位再交接：即便下游抛异常，所有权也已归属下游（其 finally 负责释放）
+                    // 先置位再交接：即便下游抛异常，所有权也已归属下游
                     handedOff = true;
                     ctx.fireChannelRead(buf);
                 }
@@ -83,11 +76,15 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             } else {
                 this.readPing(ctx, buf);
             }
+        } catch (IndexOutOfBoundsException e) {
+            // 解析越界只可能是畸形包（外部输入），按「非标准 ping」处理：
+            // 是否记录由 log-improper-pings 决定，不打内部故障堆栈
+            this.rejectImproper(ctx, e.getMessage());
         } catch (Exception e) {
             this.host.logFastPathFault(ctx.channel().remoteAddress(), e);
             ctx.channel().close();
         } finally {
-            if (!handedOff && buf.refCnt() > 0) {
+            if (!handedOff) {
                 buf.release();
             }
         }
@@ -111,10 +108,14 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         }
         buf.readUnsignedShort();
         int next = readVarInt(buf);
+        if (buf.isReadable()) {
+            // 原生 MinecraftDecoder 在 decode 之后同样会因尾随字节断开
+            throw new IndexOutOfBoundsException("握手携带多余载荷 " + buf.readableBytes() + " 字节");
+        }
 
         if (next == NEXT_STATUS_STATE) {
             this.protocol = protocol;
-            switchDecoders(ctx);
+            markStatusState(ctx);
             this.phase = Phase.REQUEST;
             this.host.onStatusHandshake(ctx.channel().remoteAddress(), protocol);
             return Verdict.CONSUMED;
@@ -133,7 +134,7 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
             return;
         }
         if (buf.isReadable()) {
-            // 与原生解码器一致：状态请求包必须为空载荷
+            // 原生解码器对状态请求的 decodeExpectedMaxLength 为 0，带载荷同样会被断开
             rejectImproper(ctx, "状态请求携带多余载荷 " + buf.readableBytes() + " 字节");
             return;
         }
@@ -144,17 +145,15 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
     private void readPing(ChannelHandlerContext ctx, ByteBuf buf) {
         int packetId = readVarInt(buf);
         if (packetId == PACKET_PING_REQUEST) {
-            // 与原生解码器一致：心跳载荷必须恰好 8 字节
+            // 原生解码器要求心跳载荷恰好 8 字节
             if (buf.readableBytes() != Long.BYTES) {
                 rejectImproper(ctx, "心跳载荷长度异常 " + buf.readableBytes());
                 return;
             }
             long time = buf.readLong();
-            // 自建含长度前缀的完整帧（本处理器位于 pipeline 前段，outbound 不经过帧编码器）
             ByteBuf pong = ctx.alloc().directBuffer(10);
             pong.writeByte(9).writeByte(PACKET_PING_REQUEST).writeLong(time);
-            // 与原生代理一致：写完 pong 后再关闭。直接在 flush 后 close 会在出站缓冲
-            // 尚未完全写出时丢弃 pong（连接关闭会 failFlushed 掉待发数据）
+            // 关闭动作挂在写完成的 promise 上：先 flush 再 close 会把尚未写出的 pong 丢弃
             this.writeResponse(ctx, pong, true);
         } else if (packetId == PACKET_STATUS_REQUEST && this.host.allowImproperPings()) {
             // 宽松模式：重复的状态请求也响应（开放空 ping 滥用面，不建议开启）
@@ -167,32 +166,23 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
     private void respondStatus(ChannelHandlerContext ctx) {
         ByteBuf response = this.host.selectResponse(this.protocol);
         if (response == null) {
-            // 插件未就绪或配置重载的瞬间窗口，直接结束连接即可
+            // 插件未就绪或正在换代的瞬间：直接结束连接即可
             ctx.channel().close();
             return;
         }
         this.writeResponse(ctx, response, false);
     }
 
+    /**
+     * 写出完整帧（自带长度前缀）。本处理器位于帧编码器之前，出站方向不经过任何编码器，
+     * 因此写的是整帧而不是裸包。
+     */
     private void writeResponse(ChannelHandlerContext ctx, ByteBuf msg, boolean closeAfterWrite) {
-        // 关闭动作挂在写完成的 promise 上：写失败时同样会关闭（由 outbound 缓冲释放消息）
+        // 关闭动作挂在写完成的 promise 上：写失败时同样会关闭（由出站缓冲释放消息）
         ChannelPromise promise = closeAfterWrite
                 ? ctx.channel().newPromise().addListener(ChannelFutureListener.CLOSE)
                 : ctx.voidPromise();
-        if (this.host.directWrite()) {
-            ChannelOutboundBuffer outbound = ctx.channel().unsafe().outboundBuffer();
-            if (outbound == null) {
-                // 连接已不可写（正在关闭）：释放帧并确保连接被回收
-                msg.release();
-                ctx.channel().close();
-                return;
-            }
-            outbound.addMessage(msg, msg.readableBytes(), promise);
-            ctx.channel().flush();
-        } else {
-            // 走标准写出路径（本处理器向 head 方向传播，帧编码器不在路径上，帧必须自带长度前缀）
-            ctx.writeAndFlush(msg, promise);
-        }
+        ctx.writeAndFlush(msg, promise);
     }
 
     private void rejectImproper(ChannelHandlerContext ctx, String detail) {
@@ -200,12 +190,11 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         ctx.channel().close();
     }
 
-    /** 把协议解码器同步到状态阶段，保证任何漏过快速路径的包仍能被原生管线正确解码。 */
-    private static void switchDecoders(ChannelHandlerContext ctx) {
-        MinecraftDecoder decoder = ctx.pipeline().get(MinecraftDecoder.class);
-        if (decoder != null) {
-            decoder.setState(StateRegistry.STATUS);
-        }
+    /**
+     * 把帧解码器同步到状态阶段：它在 HANDSHAKE 状态下会按握手包校验 serverbound 帧，
+     * 不同步会把随后的状态请求判成畸形握手。原生包解码器与编码器无需同步——本路径不再产生原生包。
+     */
+    private static void markStatusState(ChannelHandlerContext ctx) {
         MinecraftVarintFrameDecoder frameDecoder = ctx.pipeline().get(MinecraftVarintFrameDecoder.class);
         if (frameDecoder != null) {
             frameDecoder.setState(StateRegistry.STATUS);
@@ -225,10 +214,10 @@ public final class StatusFastPath extends ChannelInboundHandlerAdapter {
         throw new IndexOutOfBoundsException("varint too big");
     }
 
-    /** 跳过握手包内的主机名字符串：内容不参与任何逻辑，仅校验边界（零分配）。 */
+    /** 跳过握手包内的主机名字符串：内容不参与任何逻辑，仅校验长度边界（零分配）。 */
     private static void skipString(ByteBuf buf) {
         int length = readVarInt(buf);
-        if (length < 0 || length > MAX_HOST_LENGTH || length > buf.readableBytes()) {
+        if (length < 0 || length > buf.readableBytes()) {
             throw new IndexOutOfBoundsException("bad string length " + length);
         }
         buf.skipBytes(length);

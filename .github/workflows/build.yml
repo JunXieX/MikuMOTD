@@ -35,7 +35,14 @@ jobs:
         id: rel
         run: |
           VER="${GITHUB_REF_NAME#v}"
-          echo "title=MikuMOTD ${VER}" >> "$GITHUB_OUTPUT"
+          # tag 必须与构建版本一致，否则会发出「标题一个版本、jar 内另一个版本」的错版 Release
+          PROJECT_VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' build.gradle.kts)
+          if [ "$VER" != "$PROJECT_VER" ]; then
+            echo "tag $GITHUB_REF_NAME 与 build.gradle.kts 的版本 $PROJECT_VER 不一致" >&2
+            exit 1
+          fi
+
+          echo "title=MikuMOTD $VER" >> "$GITHUB_OUTPUT"
           # 版本规则（主版本.正式版.测试版）：第三位 > 0 → 预发布；= 0 → 正式版
           PATCH="${VER##*.}"
           case "$PATCH" in

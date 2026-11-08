@@ -33,18 +33,10 @@ public final class MikuCommand implements SimpleCommand {
                     this.deny(source);
                     return;
                 }
-                boolean ok;
-                try {
-                    ok = this.plugin.reload();
-                } catch (Exception e) {
-                    this.plugin.logger().error("配置重载失败", e);
-                    ok = false;
-                }
-                if (ok) {
-                    source.sendMessage(Component.text("MikuMOTD 配置已重载", NamedTextColor.GREEN));
-                } else {
-                    source.sendMessage(Component.text("MikuMOTD 配置重载失败，详见控制台", NamedTextColor.RED));
-                }
+                // 命令在连接的事件循环上执行：重载（文件 IO + 图标解码）必须交给调度线程
+                this.plugin.requestReload(ok -> source.sendMessage(ok
+                        ? Component.text("MikuMOTD 配置已重载", NamedTextColor.GREEN)
+                        : Component.text("MikuMOTD 配置重载失败，详见控制台", NamedTextColor.RED)));
             }
             case "info" -> {
                 if (!source.hasPermission("mikumotd.command.info")) {

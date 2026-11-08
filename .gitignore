@@ -19,6 +19,9 @@ out/
 *.log
 logs/
 
+# 仅本地保留的开发文档（不上传 GitHub）
+MikuMOTD-开发文档.md
+
 # misc
 .DS_Store
 Thumbs.db

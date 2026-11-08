@@ -48,8 +48,6 @@ motd="<bold><gradient:#40c4ff:#a78bfa>MikuMOTD</gradient></bold>{NL}<gray>由</g
 max-players=0
 # 在线人数与真实玩家列表的刷新间隔（毫秒）
 update-interval-ms=1000
-# true：直写连接出站缓冲（最快）；false：走 Netty 标准 write 路径
-direct-write=true
 # 强制使用事件模式（快速路径注入失败时插件会自动回退，仅性能不同）；改动可热重载
 compat-mode=false
 # log-pings / log-improper-pings / allow-improper-pings：诊断与安全选项，默认关闭

@@ -46,7 +46,12 @@ class ProtocolConformanceTest {
         try {
             ByteBuf frame = template.acquire(PROTOCOL);
             assertNotNull(frame);
-            byte[] raw = drain(frame);
+            byte[] raw;
+            try {
+                raw = drain(frame);
+            } finally {
+                frame.release();
+            }
 
             assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(raw)));
             ByteBuf decoded = channel.readInbound();
@@ -71,25 +76,28 @@ class ProtocolConformanceTest {
     void fastPathAnswersStatusRequestInSameSegmentAsHandshake() {
         ResponseTemplate template = sampleTemplate();
         try {
-            for (boolean directWrite : new boolean[]{true, false}) {
-                FastPathHostStub host = new FastPathHostStub(template, directWrite);
-                EmbeddedChannel channel = fastPathChannel(host);
-                try {
-                    byte[] handshake = handshake(PROTOCOL, "mc.example.com", 25565, 1);
-                    byte[] request = frame(new byte[]{0x00});
-                    // 快速路径自行消费入站包，故 writeInbound 无入站产出（返回 false）
-                    channel.writeInbound(Unpooled.wrappedBuffer(concat(handshake, request)));
+            FastPathHostStub host = new FastPathHostStub(template);
+            EmbeddedChannel channel = fastPathChannel(host);
+            try {
+                byte[] handshake = handshake(PROTOCOL, "mc.example.com", 25565, 1);
+                byte[] request = frame(new byte[]{0x00});
+                // 快速路径自行消费入站包，故 writeInbound 无入站产出（返回 false）
+                channel.writeInbound(Unpooled.wrappedBuffer(concat(handshake, request)));
 
-                    ByteBuf out = channel.readOutbound();
-                    assertNotNull(out, "应写出状态响应（directWrite=" + directWrite + "）");
-                    byte[] actual = drain(out);
-                    assertEquals(PROTOCOL, host.lastHandshakeProtocol.get(), "会话协议号应被记录");
-                    assertTrue(indexOf(actual, utf8("\"protocol\":      773")) > 0,
-                            "响应应携带客户端协议号，实得：" + new String(actual, StandardCharsets.UTF_8));
-                    assertNull(channel.readInbound(), "状态查询不应再进入下游解码器");
+                ByteBuf out = channel.readOutbound();
+                assertNotNull(out, "应写出状态响应");
+                byte[] actual;
+                try {
+                    actual = drain(out);
                 } finally {
-                    channel.finishAndReleaseAll();
+                    out.release();
                 }
+                assertEquals(PROTOCOL, host.lastHandshakeProtocol.get(), "会话协议号应被记录");
+                assertTrue(indexOf(actual, utf8("\"protocol\":      773")) > 0,
+                        "响应应携带客户端协议号，实得：" + new String(actual, StandardCharsets.UTF_8));
+                assertNull(channel.readInbound(), "状态查询不应再进入下游解码器");
+            } finally {
+                channel.finishAndReleaseAll();
             }
         } finally {
             template.dispose();
@@ -101,7 +109,7 @@ class ProtocolConformanceTest {
     void fastPathEchoesPingTimestampAndCloses() {
         ResponseTemplate template = sampleTemplate();
         try {
-            FastPathHostStub host = new FastPathHostStub(template, true);
+            FastPathHostStub host = new FastPathHostStub(template);
             EmbeddedChannel channel = fastPathChannel(host);
             try {
                 long time = 0x0102030405060708L;
@@ -109,10 +117,17 @@ class ProtocolConformanceTest {
                         concat(handshake(PROTOCOL, "h", 25565, 1),
                                 frame(new byte[]{0x00}),
                                 frame(pingBody(time)))));
-                assertNotNull(channel.readOutbound(), "状态响应");
+                ByteBuf status = channel.readOutbound();
+                assertNotNull(status, "状态响应");
+                status.release();
                 ByteBuf pong = channel.readOutbound();
                 assertNotNull(pong, "心跳应答");
-                byte[] raw = drain(pong);
+                byte[] raw;
+                try {
+                    raw = drain(pong);
+                } finally {
+                    pong.release();
+                }
                 assertArrayEquals(new byte[]{9, 0x01, 1, 2, 3, 4, 5, 6, 7, 8}, raw,
                         "pong 必须是 9 字节载荷 + 长度前缀，并原样回传时间戳");
                 assertFalse(channel.isActive(), "心跳后应关闭连接（客户端走被动关闭）");
@@ -129,7 +144,7 @@ class ProtocolConformanceTest {
     void loginHandshakeIsHandedOffToNativePipeline() {
         ResponseTemplate template = sampleTemplate();
         try {
-            FastPathHostStub host = new FastPathHostStub(template, true);
+            FastPathHostStub host = new FastPathHostStub(template);
             Capture capture = new Capture();
             EmbeddedChannel channel = fastPathChannel(host, capture);
             try {
@@ -154,7 +169,7 @@ class ProtocolConformanceTest {
         ResponseTemplate template = sampleTemplate();
         try {
             // 带多余载荷的状态请求
-            FastPathHostStub host = new FastPathHostStub(template, true);
+            FastPathHostStub host = new FastPathHostStub(template);
             EmbeddedChannel channel = fastPathChannel(host);
             try {
                 channel.writeInbound(Unpooled.wrappedBuffer(
@@ -167,18 +182,60 @@ class ProtocolConformanceTest {
             }
 
             // 心跳载荷不足 8 字节
-            FastPathHostStub host2 = new FastPathHostStub(template, true);
+            FastPathHostStub host2 = new FastPathHostStub(template);
             EmbeddedChannel channel2 = fastPathChannel(host2);
             try {
-                long time = 1L;
                 byte[] shortPing = frame(new byte[]{0x01, 0, 0, 0, 0, 0, 0, 0});
                 channel2.writeInbound(Unpooled.wrappedBuffer(
                         concat(handshake(PROTOCOL, "h", 25565, 1),
                                 frame(new byte[]{0x00}), shortPing)));
-                assertNotNull(channel2.readOutbound(), "状态响应");
+                ByteBuf status = channel2.readOutbound();
+                assertNotNull(status, "状态响应");
+                status.release();
                 assertNull(channel2.readOutbound(), "长度错误的心跳不应得到 pong");
             } finally {
                 channel2.finishAndReleaseAll();
+            }
+        } finally {
+            template.dispose();
+        }
+    }
+
+    /** 重复状态请求按 allow-improper-pings 分流：默认断开，宽松模式下继续应答。 */
+    @Test
+    void repeatedStatusRequestsFollowAllowImproperSwitch() {
+        ResponseTemplate template = sampleTemplate();
+        try {
+            byte[] traffic = concat(handshake(PROTOCOL, "h", 25565, 1),
+                    frame(new byte[]{0x00}), frame(new byte[]{0x00}));
+
+            FastPathHostStub strict = new FastPathHostStub(template);
+            EmbeddedChannel strictChannel = fastPathChannel(strict);
+            try {
+                strictChannel.writeInbound(Unpooled.wrappedBuffer(traffic.clone()));
+                ByteBuf first = strictChannel.readOutbound();
+                assertNotNull(first, "首次状态请求应被应答");
+                first.release();
+                assertNull(strictChannel.readOutbound(), "严格模式下重复请求不应被应答");
+                assertFalse(strictChannel.isActive(), "严格模式下重复请求应断开连接");
+            } finally {
+                strictChannel.finishAndReleaseAll();
+            }
+
+            FastPathHostStub lenient = new FastPathHostStub(template);
+            lenient.allowImproperPings = true;
+            EmbeddedChannel lenientChannel = fastPathChannel(lenient);
+            try {
+                lenientChannel.writeInbound(Unpooled.wrappedBuffer(traffic.clone()));
+                ByteBuf first = lenientChannel.readOutbound();
+                assertNotNull(first, "首次状态请求应被应答");
+                first.release();
+                ByteBuf second = lenientChannel.readOutbound();
+                assertNotNull(second, "宽松模式下重复请求也应被应答");
+                second.release();
+                assertTrue(lenientChannel.isActive(), "宽松模式下重复请求不应断开连接");
+            } finally {
+                lenientChannel.finishAndReleaseAll();
             }
         } finally {
             template.dispose();
@@ -195,7 +252,7 @@ class ProtocolConformanceTest {
     void installSkipsFastPathWhenHostDisabled() {
         ResponseTemplate template = sampleTemplate();
         try {
-            FastPathHostStub host = new FastPathHostStub(template, true);
+            FastPathHostStub host = new FastPathHostStub(template);
             // 线上管线的帧解码器固定叫 frame-decoder，注入点按名字定位
             EmbeddedChannel channel = new EmbeddedChannel();
             channel.pipeline().addLast(Connections.FRAME_DECODER,
@@ -227,7 +284,7 @@ class ProtocolConformanceTest {
     void installSkipsWhenFrameDecoderMissing() {
         ResponseTemplate template = sampleTemplate();
         try {
-            FastPathHostStub host = new FastPathHostStub(template, true);
+            FastPathHostStub host = new FastPathHostStub(template);
             EmbeddedChannel channel = new EmbeddedChannel();
             try {
                 assertFalse(Injector.install(channel.pipeline(), host), "无帧解码器时不挂载");
@@ -379,14 +436,13 @@ class ProtocolConformanceTest {
     private static final class FastPathHostStub implements FastPathHost {
 
         private final ResponseTemplate template;
-        private final boolean directWrite;
         volatile boolean enabled = true;
+        volatile boolean allowImproperPings;
         final AtomicInteger statusHandshakes = new AtomicInteger();
         final AtomicInteger lastHandshakeProtocol = new AtomicInteger(-1);
 
-        FastPathHostStub(ResponseTemplate template, boolean directWrite) {
+        FastPathHostStub(ResponseTemplate template) {
             this.template = template;
-            this.directWrite = directWrite;
         }
 
         @Override
@@ -400,13 +456,8 @@ class ProtocolConformanceTest {
         }
 
         @Override
-        public boolean directWrite() {
-            return this.directWrite;
-        }
-
-        @Override
         public boolean allowImproperPings() {
-            return false;
+            return this.allowImproperPings;
         }
 
         @Override
